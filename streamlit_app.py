@@ -19,32 +19,29 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Mantenimiento (Extracción estricta desde Forms).</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Extracción Posicional Estricta desde Google Forms.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
-# 2. CONFIGURACIÓN DE ENLACES (GIDs)
+# 2. ENLACES Y CONSTANTES
 # ==========================================
 SHEETS_CONFIG = [
-    # ASISTENCIA
     {"url": "https://docs.google.com/spreadsheets/d/1sccnOPuosjMSepp0FZoEGteYArIIhB2fGH7TeSRW_7E/export?format=csv&gid=1128388185", "skiprows": 2, "tipo": "asistencia"},
     {"url": "https://docs.google.com/spreadsheets/d/1UNSCxrTy9TUdggNt0ta0TcsEvT3idaRGWcXE_t8J40I/export?format=csv&gid=979884533", "skiprows": 0, "tipo": "asistencia"},
-    # CORRECTIVOS
     {"url": "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893", "skiprows": 2, "tipo": "correctivo"},
     {"url": "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679", "skiprows": 0, "tipo": "correctivo"},
-    # PREVENTIVOS
     {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo"},
     {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv", "skiprows": 0, "tipo": "preventivo"}
 ]
 
-# Nombres exactos de las columnas de clientes para evitar confundir con las preguntas del form
-COLUMNAS_CLIENTES = [
-    'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 'PIEZAS PEUGEOT',
-    'NUMERO DE PIEZA', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT'
+# Las columnas exactas del formulario donde el matricero elige la pieza
+VALID_PIEZA_COLS = [
+    'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 
+    'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
 ]
 
 def clean_matricero(name):
-    """Agrupa al matricero por su Legajo para evitar duplicados."""
+    """Estandariza el nombre del matricero usando su Legajo."""
     name = str(name).upper().strip()
     name = re.sub(r'\s+', ' ', name)
     match = re.match(r'^(\d+)\s*[-_]?\s*(.*)', name)
@@ -52,7 +49,7 @@ def clean_matricero(name):
     return name
 
 # ==========================================
-# 3. EXTRACCIÓN ESTRICTA NATIVA (FORMS)
+# 3. MOTOR DE EXTRACCIÓN POSICIONAL
 # ==========================================
 @st.cache_data(ttl=300)
 def load_data():
@@ -62,73 +59,75 @@ def load_data():
         try:
             df = pd.read_csv(config["url"], skiprows=config["skiprows"])
             
-            # Limpieza exhaustiva de encabezados
+            # Limpieza básica de encabezados
             df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
-
-            # Evitar error de Pandas renombrando columnas idénticas
+            
+            # Evitar error de Pandas renombrando duplicados (Pandas agregará .1, .2)
             cols = pd.Series(df.columns)
             for dup in cols[cols.duplicated()].unique():
                 cols[cols[cols == dup].index.values.tolist()] = [f"{dup}.{i}" if i != 0 else dup for i in range(sum(cols == dup))]
             df.columns = cols
             df_cols = df.columns.tolist()
 
-            # Buscar estrictamente las columnas ORIGINALES del formulario
-            c_fecha = next((c for c in df_cols if c == 'FECHA'), None)
-            c_mat = next((c for c in df_cols if c == 'MATRICERO'), None)
+            # Buscar índice exacto de Fecha y Matricero
+            idx_fecha = next((i for i, c in enumerate(df_cols) if c == 'FECHA'), None)
+            idx_mat = next((i for i, c in enumerate(df_cols) if c == 'MATRICERO'), None)
             
-            if not c_fecha or not c_mat: 
+            if idx_fecha is None or idx_mat is None: 
                 continue
 
-            # --- LECTURA FILA POR FILA ---
-            for idx, row in df.iterrows():
-                fecha = str(row[c_fecha]).strip()
-                mat = str(row[c_mat]).strip()
+            # --- LECTURA FILA POR FILA POR POSICIÓN ---
+            for _, row in df.iterrows():
+                fecha = str(row.iloc[idx_fecha]).strip()
+                mat = str(row.iloc[idx_mat]).strip()
                 
+                # Ignorar si no hay datos base
                 if fecha in ['NAN', 'NONE', ''] or mat in ['NAN', 'NONE', '']: 
                     continue
-
                 mat = clean_matricero(mat)
 
                 # ====================================================
-                # MANTENIMIENTO: PREVENTIVO / CORRECTIVO
+                # PREVENTIVO / CORRECTIVO
                 # ====================================================
                 if config['tipo'] in ['preventivo', 'correctivo']:
-                    
-                    # Extraer Horas
-                    c_hs = next((c for c in df_cols if 'HS REALIZADAS' in c and 'TAREA' not in c), None)
+                    # 1. Extraer Horas
+                    idx_hs = next((i for i, c in enumerate(df_cols) if 'HS REALIZADAS' in c and 'TAREA' not in c), None)
                     horas = 0.0
-                    if c_hs and pd.notna(row[c_hs]):
+                    if idx_hs is not None and pd.notna(row.iloc[idx_hs]):
                         try:
-                            horas = float(str(row[c_hs]).replace(',', '.'))
+                            val = float(str(row.iloc[idx_hs]).replace(',', '.'))
+                            if val > 0: horas = val
                         except: pass
                     
                     if horas <= 0: continue
 
-                    # Extraer Estado (Terminado SÍ/NO)
+                    # 2. Extraer Estado (SÍ/NO)
                     estado = 'NO'
-                    c_term = next((c for c in df_cols if 'TERMINADO' in c or 'TERMINO' in c), None)
-                    if c_term and pd.notna(row[c_term]):
-                        val_t = str(row[c_term]).upper()
-                        if 'SI' in val_t or 'SÍ' in val_t: estado = 'SI'
+                    idx_term = next((i for i, c in enumerate(df_cols) if 'TERMINADO' in c or 'TERMINO' in c), None)
+                    if idx_term is not None and pd.notna(row.iloc[idx_term]):
+                        if 'SI' in str(row.iloc[idx_term]).upper() or 'SÍ' in str(row.iloc[idx_term]).upper(): 
+                            estado = 'SI'
 
+                    # 3. Barrido Posicional de Piezas y Operación
                     piezas_found = []
+                    for i, col_name in enumerate(df_cols):
+                        base_col = col_name.split('.')[0].strip() # Quitar el ".1" de Pandas
+                        
+                        if base_col in VALID_PIEZA_COLS:
+                            val_pieza = str(row.iloc[i]).strip()
+                            
+                            # Si llenaron esta pieza, la operación es SIEMPRE la columna que le sigue (i+1)
+                            if val_pieza and val_pieza.upper() not in ['NAN', 'NONE', '-']:
+                                op_val = str(row.iloc[i+1]).strip() if (i+1) < len(df_cols) else '-'
+                                
+                                piezas_found.append({
+                                    'matriz': val_pieza, 
+                                    'op': op_val
+                                })
 
-                    # Buscar unicamente en las columnas de clientes oficiales
-                    for i, cp in enumerate(df_cols):
-                        if cp in COLUMNAS_CLIENTES:
-                            val_pieza = str(row[cp]).strip()
-                            if val_pieza and val_pieza not in ['NAN', 'NONE', '-', '']:
-                                op_val = '-'
-                                # La Operación siempre está dentro de las siguientes 3 columnas
-                                for nc in df_cols[i+1:i+4]:
-                                    if 'OPERACION' in nc or 'OPERACIÓN' in nc:
-                                        v_op = str(row[nc]).strip()
-                                        if v_op and v_op not in ['NAN', 'NONE', '-', '']:
-                                            op_val = v_op
-                                        break
-                                piezas_found.append({'matriz': val_pieza, 'op': op_val})
-
+                    # 4. Guardar Datos
                     if piezas_found:
+                        # Si llenaron varias piezas (ej: 2) en el mismo form, se dividen las horas
                         hs_per_piece = horas / len(piezas_found)
                         for p in piezas_found:
                             mant_data.append({
@@ -139,22 +138,26 @@ def load_data():
                         cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas})
 
                 # ====================================================
-                # ASISTENCIA (TAREAS MÚLTIPLES)
+                # ASISTENCIA (MULTITAREAS)
                 # ====================================================
                 elif config['tipo'] == 'asistencia':
                     horas_asist_totales = 0.0
-                    for i in range(1, 5):
-                        c_tarea = next((c for c in df_cols if (f'{i} - TAREA' in c or f'1 - TAREA {i}' in c) and 'HS' not in c), None)
-                        c_hs = next((c for c in df_cols if f'TAREA {i} - HS REALIZADAS' in c), None)
-
-                        if c_tarea and c_hs and pd.notna(row[c_tarea]) and pd.notna(row[c_hs]):
-                            t_val = str(row[c_tarea]).strip()
-                            try:
-                                h_val = float(str(row[c_hs]).replace(',', '.'))
-                                if h_val > 0 and t_val not in ['NAN', 'NONE', '']:
-                                    act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val})
-                                    horas_asist_totales += h_val
-                            except: pass
+                    
+                    # Barrer las columnas buscando las tareas.
+                    # En Google Forms, la columna de Horas siempre está a la derecha de la de Tarea.
+                    for i, col_name in enumerate(df_cols):
+                        # Detecta si la columna es "1 - Tarea 1", "1 - Tarea 2", etc.
+                        if 'TAREA' in col_name and 'HS' not in col_name and 'OBS' not in col_name and 'DESEA' not in col_name and re.search(r'\d', col_name):
+                            t_val = str(row.iloc[i]).strip()
+                            
+                            # Si completaron la tarea, leer las horas en la celda de la derecha (i+1)
+                            if t_val and t_val.upper() not in ['NAN', 'NONE', '-']:
+                                try:
+                                    h_val = float(str(row.iloc[i+1]).replace(',', '.'))
+                                    if h_val > 0:
+                                        act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val})
+                                        horas_asist_totales += h_val
+                                except: pass
 
                     if horas_asist_totales > 0:
                         cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas_asist_totales})
@@ -164,7 +167,7 @@ def load_data():
             pass
             
     # ==========================
-    # AGRUPACIÓN FINAL DE DATOS
+    # AGRUPACIÓN DE DATOS
     # ==========================
     df_calendario = pd.DataFrame(cal_data)
     if not df_calendario.empty:
@@ -526,7 +529,7 @@ st.write("")
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 with col_btn2:
     if st.button("🖨️ Procesar y Generar PDF", type="primary", use_container_width=True):
-        with st.spinner("Extrayendo datos de los formularios originales..."):
+        with st.spinner("Extrayendo datos posicionalmente desde los formularios originales..."):
             try:
                 pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date)
                 st.success("¡PDF generado correctamente sin omitir datos!")
