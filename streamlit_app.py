@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Estado de Matrices.</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Estado de Mantenimiento de Matrices.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -40,10 +40,9 @@ SHEETS_CONFIG = [
 ]
 
 def clean_matricero(name):
-    """Limpia el nombre del matricero agrupándolo por su Legajo (números iniciales)"""
+    """Limpia el nombre del matricero agrupándolo por su Legajo"""
     name = str(name).upper().strip()
-    name = re.sub(r'\s+', ' ', name) # Quitar espacios múltiples
-    # Buscar si empieza con números (Legajo)
+    name = re.sub(r'\s+', ' ', name)
     match = re.match(r'^(\d+)\s*[-_]?\s*(.*)', name)
     if match:
         return f"{match.group(1)} - {match.group(2).strip()}"
@@ -67,15 +66,22 @@ def load_data():
                         df = df.iloc[i+1:].reset_index(drop=True)
                         break
 
-            df.columns = df.columns.astype(str).str.upper().str.strip()
-            df = df.loc[:, ~df.columns.duplicated()].copy()
+            # Limpiar duplicados y estandarizar columnas
+            raw_cols = df.columns.astype(str).str.upper().str.strip().tolist()
+            new_cols, seen = [], {}
+            for c in raw_cols:
+                if c in seen:
+                    seen[c] += 1
+                    new_cols.append(f"{c}.{seen[c]}")
+                else:
+                    seen[c] = 0
+                    new_cols.append(c)
+            df.columns = new_cols
             
             col_fecha = next((c for c in df.columns if c in ['1 - FECHA', 'FECHA']), None)
-            
-            if not col_fecha:
-                continue
+            if not col_fecha: continue
 
-            # --- LÓGICA HORAS (Cal, Mant, Act) ---
+            # --- EXTRACCIÓN DE HORAS ---
             col_mat = next((c for c in df.columns if c in ['1 - MATRICERO', 'MATRICERO']), None)
             col_horas_clean = next((c for c in df.columns if c in ['1 - HORAS', 'TOTAL HS', 'HORAS', 'HS']), None)
             
@@ -90,39 +96,67 @@ def load_data():
             # 1. Calendario General
             if col_mat:
                 df_cal = pd.DataFrame({'FECHA': df[col_fecha], 'MATRICERO': df[col_mat], 'TOTAL_HORAS': df['HORAS_CALCULADAS']})
-                # APLICAR LIMPIEZA DE LEGAJOS AQUI
                 df_cal['MATRICERO'] = df_cal['MATRICERO'].apply(clean_matricero)
                 cal_data.append(df_cal)
 
-            # 2. Cuadro de Mantenimiento
+            # 2. Cuadro de Mantenimiento (Extracción Multi-Cliente)
             if config["tipo"] in ["preventivo", "correctivo"]:
-                col_pieza = next((c for c in df.columns if c in ['1 - PIEZA', 'MATRIZ', 'PIEZA', 'NUMERO DE PIEZA']), None)
-                col_operacion = next((c for c in df.columns if c in ['1 - OPERACION', 'OPERACION']), None)
                 col_terminado = next((c for c in df.columns if c in ['1 - TERMINADO?', 'TERMINADO?', 'TERMINADO', 'EL MANTENIMIENTO CORRECTIVO ESTA TERMINADO?', 'SE TERMINO EL MANTENIMIENTO PREVENTIVO?']), None)
                 
-                if col_pieza and col_terminado:
-                    # Limpiar columna de operación
-                    operacion_serie = df[col_operacion].astype(str).str.strip().replace({'nan': '-', 'NaN': '-', 'None': '-', '': '-'}) if col_operacion else "-"
+                # Barrido de todas las columnas que digan pieza/matriz (ej. PIEZAS FIAT, PIEZAS RENAULT...)
+                exclusions = ['TIPO', 'LIMPIEZA', 'CERRAMIENTO', '[', '?', 'MANTENIMIENTO']
+                cols_pieza_candidatas = [c for c in df.columns if ('PIEZA' in c or 'MATRIZ' in c) and not any(x in c for x in exclusions)]
+                
+                if col_terminado and cols_pieza_candidatas:
+                    mant_rows = []
+                    for idx, row in df.iterrows():
+                        fecha_val = row[col_fecha]
+                        horas_val = row['HORAS_CALCULADAS']
+                        terminado_val = str(row[col_terminado]).upper().strip()
+                        if terminado_val in ['NAN', 'NONE', '']: terminado_val = "NO"
+
+                        usado_limpio = False
+                        # Prioridad: Si llenaron las columnas de validación limpia finales
+                        if '1 - PIEZA' in df.columns and pd.notna(row.get('1 - PIEZA')) and str(row.get('1 - PIEZA')).strip().upper() not in ['', 'NAN', 'NONE', '-']:
+                            p = str(row['1 - PIEZA']).strip()
+                            o = str(row.get('1 - OPERACION', row.get('OPERACION', '-'))).strip()
+                            if o.upper() in ['', 'NAN', 'NONE']: o = "-"
+                            mant_rows.append({'FECHA': fecha_val, 'MATRIZ': p, 'OPERACION': o, 'TIPO': config["tipo"].upper(), 'HORAS': horas_val, 'TERMINADO': terminado_val})
+                            usado_limpio = True
+                            
+                        # Si no, BARRIDO HORIZONTAL DE CLIENTES
+                        if not usado_limpio:
+                            piezas_en_fila = 0
+                            for col_idx, col_name in enumerate(df.columns):
+                                if col_name in cols_pieza_candidatas:
+                                    val = str(row[col_name]).strip()
+                                    if val and val.upper() not in ['NAN', 'NONE', '']:
+                                        p = val
+                                        o = "-"
+                                        # Buscar la columna "Operacion" adyacente a esta pieza
+                                        for next_col in df.columns[col_idx+1 : col_idx+4]:
+                                            if 'OPERACION' in next_col:
+                                                temp_op = str(row[next_col]).strip()
+                                                if temp_op and temp_op.upper() not in ['NAN', 'NONE', '']:
+                                                    o = temp_op
+                                                break
+                                        
+                                        mant_rows.append({'FECHA': fecha_val, 'MATRIZ': p, 'OPERACION': o, 'TIPO': config["tipo"].upper(), 'HORAS': horas_val, 'TERMINADO': terminado_val})
+                                        piezas_en_fila += 1
+                            
+                            # Si llenaron varias matrices de distintos clientes en 1 sola fila, dividir las horas para no duplicar
+                            if piezas_en_fila > 1:
+                                for k in range(1, piezas_en_fila + 1):
+                                    mant_rows[-k]['HORAS'] = horas_val / piezas_en_fila
                     
-                    df_m = pd.DataFrame({
-                        'FECHA': df[col_fecha],
-                        'MATRIZ': df[col_pieza].astype(str).str.strip(),
-                        'OPERACION': operacion_serie,
-                        'TIPO': config["tipo"].upper(),
-                        'HORAS': df['HORAS_CALCULADAS'],
-                        'TERMINADO': df[col_terminado].astype(str).str.upper().str.strip()
-                    })
-                    mant_data.append(df_m)
+                    if mant_rows:
+                        mant_data.append(pd.DataFrame(mant_rows))
 
             # 3. Tareas de Asistencia
             if config["tipo"] == "asistencia":
                 col_tarea = next((c for c in df.columns if c in ['TAREAS', 'PRIMER TAREA', '1 - TAREA 1', 'TAREAS REALIZADAS']), None)
                 if col_tarea:
-                    df_act = pd.DataFrame({
-                        'FECHA': df[col_fecha],
-                        'TAREA': df[col_tarea].astype(str).str.strip(),
-                        'HORAS': df['HORAS_CALCULADAS']
-                    })
+                    df_act = pd.DataFrame({'FECHA': df[col_fecha], 'TAREA': df[col_tarea].astype(str).str.strip(), 'HORAS': df['HORAS_CALCULADAS']})
                     act_data.append(df_act)
 
         except Exception as e:
@@ -143,7 +177,6 @@ def load_data():
     if not df_mantenimiento.empty:
         df_mantenimiento['FECHA'] = pd.to_datetime(df_mantenimiento['FECHA'], errors='coerce', dayfirst=True)
         df_mantenimiento = df_mantenimiento.dropna(subset=['FECHA'])
-        df_mantenimiento = df_mantenimiento[~df_mantenimiento['MATRIZ'].isin(['nan', 'NaN', 'None', ''])]
 
     df_actividades = pd.concat(act_data, ignore_index=True) if act_data else pd.DataFrame()
     if not df_actividades.empty:
@@ -225,60 +258,53 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         pdf.add_page()
         pdf.set_font("Arial", 'B', 14)
         pdf.set_text_color(31, 73, 125)
-        pdf.cell(0, 8, f"RESUMEN MENSUAL: {meses_es[month]} {year}", ln=True, align='L')
+        pdf.cell(0, 8, f"RESUMEN MENSUAL DE ASISTENCIA: {meses_es[month]} {year}", ln=True, align='L')
         pdf.ln(2)
 
         working_days = sum(1 for d in dates_in_month if d.weekday() < 5)
         estimated_hs = working_days * 8
         
-        pdf.set_font("Arial", 'B', 8)
+        pdf.set_font("Arial", 'B', 9)
         pdf.set_fill_color(0, 0, 0)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(196, 6, "RESUMEN DE ASISTENCIA Y HORAS EXTRAS", border=1, ln=True, align='C', fill=True)
+        pdf.cell(196, 6, "TABLA DE HORAS POR MATRICERO", border=1, ln=True, align='C', fill=True)
 
+        # Cabeceras sin Ausencias ni Extras
         pdf.set_fill_color(31, 73, 125)
-        pdf.cell(50, 6, "MATRICERO", border=1, align='C', fill=True)
-        pdf.cell(26, 6, "AUSENCIAS", border=1, align='C', fill=True)
-        pdf.cell(26, 6, "HS EXTRA", border=1, align='C', fill=True)
-        pdf.cell(32, 6, "ESTIMADO DE HS", border=1, align='C', fill=True)
-        pdf.cell(34, 6, "HS REPORTADAS", border=1, align='C', fill=True)
+        pdf.cell(70, 6, "MATRICERO", border=1, align='C', fill=True)
+        pdf.cell(40, 6, "ESTIMADO DE HS", border=1, align='C', fill=True)
+        pdf.cell(40, 6, "HS CARGADAS", border=1, align='C', fill=True)
         pdf.set_fill_color(192, 0, 0)
-        pdf.cell(28, 6, "DIFERENCIA", border=1, align='C', ln=True, fill=True)
+        pdf.cell(46, 6, "FALTANTE / DIFERENCIA", border=1, align='C', ln=True, fill=True)
 
-        pdf.set_font("Arial", 'B', 8)
+        pdf.set_font("Arial", 'B', 9)
         for mat in all_matriceros:
             df_mat = df_datos[df_datos['MATRICERO'] == mat]
-            hs_extra = ausencias = reported = 0
+            reported = 0
             
             for d in dates_in_month:
                 val = df_mat[df_mat['FECHA'].dt.date == d]['TOTAL_HORAS'].sum()
                 reported += val
-                if d.weekday() >= 5: hs_extra += val
-                else:
-                    if val > 8: hs_extra += (val - 8)
-                    elif val < 8: ausencias += (8 - val)
+
+            diff = reported - estimated_hs
 
             pdf.set_fill_color(240, 240, 240)
             pdf.set_text_color(0, 0, 0)
-            pdf.cell(50, 6, clean_text(mat[:25]), border=1, fill=True)
-            pdf.set_fill_color(255, 255, 255)
+            pdf.cell(70, 6, clean_text(mat[:35]), border=1, fill=True)
             
-            t_aus = str(int(ausencias)) if ausencias == int(ausencias) else f"{ausencias:.1f}"
-            pdf.cell(26, 6, t_aus if ausencias > 0 else "", border=1, align='C', fill=True)
-            t_ext = str(int(hs_extra)) if hs_extra == int(hs_extra) else f"{hs_extra:.1f}"
-            pdf.cell(26, 6, t_ext if hs_extra > 0 else "", border=1, align='C', fill=True)
-            pdf.cell(32, 6, str(estimated_hs), border=1, align='C', fill=True)
+            pdf.set_fill_color(255, 255, 255)
+            pdf.cell(40, 6, str(estimated_hs), border=1, align='C', fill=True)
+            
             t_rep = str(int(reported)) if reported == int(reported) else f"{reported:.1f}"
-            pdf.cell(34, 6, t_rep, border=1, align='C', fill=True)
+            pdf.cell(40, 6, t_rep, border=1, align='C', fill=True)
 
-            diff = reported - estimated_hs
             if diff < 0: pdf.set_text_color(192, 0, 0) 
             elif diff > 0: pdf.set_text_color(0, 128, 0)
             else: pdf.set_text_color(0, 0, 0)
             
             sign = "+" if diff > 0 else ""
             t_diff = f"{sign}{int(diff)}" if diff == int(diff) else f"{sign}{diff:.1f}"
-            pdf.cell(28, 6, t_diff, border=1, align='C', ln=True, fill=True)
+            pdf.cell(46, 6, t_diff, border=1, align='C', ln=True, fill=True)
 
         # CALENDARIOS
         pdf.add_page()
@@ -294,7 +320,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
                 monday = d - timedelta(days=d.weekday())
                 weeks_dict[w] = [monday + timedelta(days=i) for i in range(7)]
 
-        w_mat, w_day = 50, 30 
+        w_mat, w_day = 60, 28 
         total_w = w_mat + (7 * w_day)
         req_h = 16 + (len(all_matriceros) * 8) + 5
 
@@ -326,7 +352,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
             for mat in all_matriceros:
                 pdf.set_fill_color(240, 240, 240)
                 pdf.set_text_color(0, 0, 0)
-                pdf.cell(w_mat, 8, clean_text(mat[:25]), border=1, fill=True)
+                pdf.cell(w_mat, 8, clean_text(mat[:30]), border=1, fill=True)
                 
                 df_mat = df_datos[df_datos['MATRICERO'] == mat]
                 for d in full_week:
@@ -377,9 +403,9 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         pdf.set_fill_color(0, 0, 0)
         pdf.set_text_color(255, 255, 255)
         
-        # Anchos: 100 + 30 + 35 + 40 = 205
+        # Anchos: 100 (Matriz) + 35 (Operacion) + 35 (Horas) + 40 (Estado) = 210
         pdf.cell(100, 7, "MATRIZ / PIEZA", border=1, fill=True)
-        pdf.cell(30, 7, "OPERACIÓN", border=1, align='C', fill=True)
+        pdf.cell(35, 7, "OPERACIÓN", border=1, align='C', fill=True)
         pdf.cell(35, 7, "HS INSUMIDAS", border=1, align='C', fill=True)
         pdf.cell(40, 7, "ESTADO AL CIERRE", border=1, align='C', ln=True, fill=True)
 
@@ -395,7 +421,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
             pdf.set_fill_color(255, 255, 255)
             pdf.set_text_color(0, 0, 0)
             pdf.cell(100, 7, clean_text(matriz[:55]), border=1)
-            pdf.cell(30, 7, clean_text(operacion[:15]), border=1, align='C')
+            pdf.cell(35, 7, clean_text(operacion[:20]), border=1, align='C')
             
             hs_txt = str(int(row['HS_ACUMULADAS'])) if row['HS_ACUMULADAS'] == int(row['HS_ACUMULADAS']) else f"{row['HS_ACUMULADAS']:.1f}"
             pdf.cell(35, 7, hs_txt, border=1, align='C')
@@ -413,7 +439,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         pdf.set_font("Arial", 'B', 9)
         pdf.set_fill_color(220, 220, 220)
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(130, 7, f"TOTAL HORAS {title}", border=1, align='R', fill=True)
+        pdf.cell(135, 7, f"TOTAL HORAS {title}", border=1, align='R', fill=True)
         
         t_hs_txt = str(int(total_hs)) if total_hs == int(total_hs) else f"{total_hs:.1f}"
         pdf.cell(35, 7, t_hs_txt, border=1, align='C', fill=True)
@@ -450,7 +476,6 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     # =========================================================
     # PARTE 3: ASISTENCIA CON TOTALES
     # =========================================================
-    # Salto de página para que Asistencia quede prolijo
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
     pdf.set_text_color(31, 73, 125)
@@ -511,7 +536,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
 st.write("") 
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 with col_btn2:
-    if st.button("🖨️ Procesar y Generar PDF", type="primary", use_container_width=True):
+    if st.button("🖨️ Procesar y Generar PDF Completo", type="primary", use_container_width=True):
         with st.spinner("Construyendo documento PDF..."):
             try:
                 pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date)
