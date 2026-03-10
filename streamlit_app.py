@@ -18,7 +18,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Estado de Matrices.</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Estado de Mantenimiento de Matrices Multi-Cliente.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -46,7 +46,7 @@ def load_data():
         try:
             df = pd.read_csv(config["url"])
             
-            # Buscador Inteligente de Encabezados
+            # Buscador Inteligente de Encabezados (ignora filas vacías al inicio)
             cols_upper = df.columns.astype(str).str.upper()
             if not (any('FECHA' in c for c in cols_upper) or any('MATRICERO' in c for c in cols_upper)):
                 for i in range(min(10, len(df))):
@@ -56,15 +56,22 @@ def load_data():
                         df = df.iloc[i+1:].reset_index(drop=True)
                         break
 
-            df.columns = df.columns.astype(str).str.upper().str.strip()
-            df = df.loc[:, ~df.columns.duplicated()].copy()
+            # Estandarizar y asegurar que no haya columnas con nombres idénticos que rompan Pandas
+            raw_cols = df.columns.astype(str).str.upper().str.strip().tolist()
+            new_cols, seen = [], {}
+            for c in raw_cols:
+                if c in seen:
+                    seen[c] += 1
+                    new_cols.append(f"{c}.{seen[c]}")
+                else:
+                    seen[c] = 0
+                    new_cols.append(c)
+            df.columns = new_cols
             
             col_fecha = next((c for c in df.columns if c in ['1 - FECHA', 'FECHA']), None)
-            
-            if not col_fecha:
-                continue
+            if not col_fecha: continue
 
-            # --- LÓGICA HORAS (Cal, Mant, Act) ---
+            # --- EXTRACCIÓN DE HORAS ---
             col_mat = next((c for c in df.columns if c in ['1 - MATRICERO', 'MATRICERO']), None)
             col_horas_clean = next((c for c in df.columns if c in ['1 - HORAS', 'TOTAL HS', 'HORAS', 'HS']), None)
             
@@ -76,25 +83,63 @@ def load_data():
                 for c in cols_hs_parciales:
                     df['HORAS_CALCULADAS'] += pd.to_numeric(df[c], errors='coerce').fillna(0)
 
-            # 1. Calendario General
+            # 1. Armar Calendario General
             if col_mat:
                 df_cal = pd.DataFrame({'FECHA': df[col_fecha], 'MATRICERO': df[col_mat], 'TOTAL_HORAS': df['HORAS_CALCULADAS']})
                 cal_data.append(df_cal)
 
-            # 2. Cuadro de Mantenimiento
+            # 2. Armar Cuadro de Mantenimiento Multi-Cliente
             if config["tipo"] in ["preventivo", "correctivo"]:
-                col_pieza = next((c for c in df.columns if c in ['1 - PIEZA', 'MATRIZ', 'PIEZA', 'NUMERO DE PIEZA']), None)
                 col_terminado = next((c for c in df.columns if c in ['1 - TERMINADO?', 'TERMINADO?', 'TERMINADO', 'EL MANTENIMIENTO CORRECTIVO ESTA TERMINADO?', 'SE TERMINO EL MANTENIMIENTO PREVENTIVO?']), None)
                 
-                if col_pieza and col_terminado:
-                    df_m = pd.DataFrame({
-                        'FECHA': df[col_fecha],
-                        'MATRIZ': df[col_pieza].astype(str).str.strip(),
-                        'TIPO': config["tipo"].upper(),
-                        'HORAS': df['HORAS_CALCULADAS'],
-                        'TERMINADO': df[col_terminado].astype(str).str.upper().str.strip()
-                    })
-                    mant_data.append(df_m)
+                # Buscar TODAS las columnas posibles de piezas (Fiat, Renault, Nissan, etc.), excluyendo preguntas del formulario
+                exclusions = ['TIPO', 'LIMPIEZA', 'CERRAMIENTO', '[', '?', 'MANTENIMIENTO']
+                cols_pieza_candidatas = [c for c in df.columns if ('PIEZA' in c or 'MATRIZ' in c) and not any(x in c for x in exclusions)]
+                
+                if col_terminado and cols_pieza_candidatas:
+                    mant_rows = []
+                    for idx, row in df.iterrows():
+                        fecha_val = row[col_fecha]
+                        horas_val = row['HORAS_CALCULADAS']
+                        terminado_val = str(row[col_terminado]).upper().strip()
+                        if terminado_val in ['NAN', 'NONE', '']: terminado_val = "NO"
+
+                        # Si la persona usó las "columnas limpias" al final de la hoja, priorizamos esa
+                        usado_limpio = False
+                        if '1 - PIEZA' in df.columns and pd.notna(row.get('1 - PIEZA')) and str(row.get('1 - PIEZA')).strip().upper() not in ['', 'NAN', 'NONE', '-']:
+                            p = str(row['1 - PIEZA']).strip()
+                            o = str(row.get('1 - OPERACION', row.get('OPERACION', '-'))).strip()
+                            if o.upper() in ['', 'NAN', 'NONE']: o = "-"
+                            mant_rows.append({'FECHA': fecha_val, 'MATRIZ': p, 'OPERACION': o, 'TIPO': config["tipo"].upper(), 'HORAS': horas_val, 'TERMINADO': terminado_val})
+                            usado_limpio = True
+                            
+                        # Si no usaron la limpia, hacemos BARRIDO de todos los clientes en la fila
+                        if not usado_limpio:
+                            piezas_en_fila = 0
+                            for col_idx, col_name in enumerate(df.columns):
+                                if col_name in cols_pieza_candidatas:
+                                    val = str(row[col_name]).strip()
+                                    if val and val.upper() not in ['NAN', 'NONE', '']:
+                                        p = val
+                                        o = "-"
+                                        # Buscar la columna "Operacion" que le sigue a esta pieza
+                                        for next_col in df.columns[col_idx+1 : col_idx+4]:
+                                            if 'OPERACION' in next_col:
+                                                temp_op = str(row[next_col]).strip()
+                                                if temp_op and temp_op.upper() not in ['NAN', 'NONE', '']:
+                                                    o = temp_op
+                                                break
+                                        
+                                        mant_rows.append({'FECHA': fecha_val, 'MATRIZ': p, 'OPERACION': o, 'TIPO': config["tipo"].upper(), 'HORAS': horas_val, 'TERMINADO': terminado_val})
+                                        piezas_en_fila += 1
+                            
+                            # Si llenaron varias matrices en una misma fila, evitamos duplicar las horas totales dividiéndola equitativamente
+                            if piezas_en_fila > 1:
+                                for k in range(1, piezas_en_fila + 1):
+                                    mant_rows[-k]['HORAS'] = horas_val / piezas_en_fila
+                    
+                    if mant_rows:
+                        mant_data.append(pd.DataFrame(mant_rows))
 
             # 3. Tareas de Asistencia
             if config["tipo"] == "asistencia":
@@ -333,7 +378,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
             pdf.ln(5)
 
     # =========================================================
-    # PARTE 2: MANTENIMIENTO 
+    # PARTE 2: MANTENIMIENTO CON OPERACIÓN Y TOTALES
     # =========================================================
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
@@ -349,7 +394,8 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         
         if not df_m_period.empty:
             df_m_period = df_m_period.sort_values('FECHA')
-            resumen_mant = df_m_period.groupby(['MATRIZ', 'TIPO']).agg(
+            
+            resumen_mant = df_m_period.groupby(['MATRIZ', 'OPERACION', 'TIPO']).agg(
                 HS_ACUMULADAS=('HORAS', 'sum'),
                 ULTIMO_ESTADO=('TERMINADO', 'last')
             ).reset_index().sort_values('HS_ACUMULADAS', ascending=False)
@@ -357,24 +403,29 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
             pdf.set_font("Arial", 'B', 9)
             pdf.set_fill_color(0, 0, 0)
             pdf.set_text_color(255, 255, 255)
-            # Ancho total: 80 + 40 + 40 + 40 = 200
             pdf.cell(80, 7, "MATRIZ / PIEZA", border=1, fill=True)
-            pdf.cell(40, 7, "TIPO", border=1, align='C', fill=True)
-            pdf.cell(40, 7, "HS INSUMIDAS", border=1, align='C', fill=True)
+            pdf.cell(30, 7, "OPERACIÓN", border=1, align='C', fill=True)
+            pdf.cell(35, 7, "TIPO", border=1, align='C', fill=True)
+            pdf.cell(35, 7, "HS INSUMIDAS", border=1, align='C', fill=True)
             pdf.cell(40, 7, "ESTADO AL CIERRE", border=1, align='C', ln=True, fill=True)
 
             pdf.set_font("Arial", '', 9)
+            total_hs_mant = 0
+
             for _, row in resumen_mant.iterrows():
                 matriz = str(row['MATRIZ'])
+                operacion = str(row['OPERACION'])
                 estado = str(row['ULTIMO_ESTADO']).upper()
+                total_hs_mant += row['HS_ACUMULADAS']
                 
                 pdf.set_fill_color(255, 255, 255)
                 pdf.set_text_color(0, 0, 0)
                 pdf.cell(80, 7, clean_text(matriz[:45]), border=1)
-                pdf.cell(40, 7, clean_text(row['TIPO']), border=1, align='C')
+                pdf.cell(30, 7, clean_text(operacion[:15]), border=1, align='C')
+                pdf.cell(35, 7, clean_text(row['TIPO']), border=1, align='C')
                 
                 hs_txt = str(int(row['HS_ACUMULADAS'])) if row['HS_ACUMULADAS'] == int(row['HS_ACUMULADAS']) else f"{row['HS_ACUMULADAS']:.1f}"
-                pdf.cell(40, 7, hs_txt, border=1, align='C')
+                pdf.cell(35, 7, hs_txt, border=1, align='C')
                 
                 if "SI" in estado or "SÍ" in estado:
                     pdf.set_text_color(0, 128, 0)
@@ -384,6 +435,17 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
                     estado_print = "PENDIENTE"
                 
                 pdf.cell(40, 7, clean_text(estado_print), border=1, align='C', ln=True)
+
+            # FILA DE TOTALES
+            pdf.set_font("Arial", 'B', 9)
+            pdf.set_fill_color(220, 220, 220)
+            pdf.set_text_color(0, 0, 0)
+            pdf.cell(145, 7, "TOTAL HORAS MANTENIMIENTO", border=1, align='R', fill=True)
+            
+            t_hs_mant_txt = str(int(total_hs_mant)) if total_hs_mant == int(total_hs_mant) else f"{total_hs_mant:.1f}"
+            pdf.cell(35, 7, t_hs_mant_txt, border=1, align='C', fill=True)
+            pdf.cell(40, 7, "", border=1, align='C', ln=True, fill=True)
+
         else:
             pdf.set_font("Arial", '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -396,7 +458,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     pdf.ln(10)
 
     # =========================================================
-    # PARTE 3: ASISTENCIA
+    # PARTE 3: ASISTENCIA CON TOTALES
     # =========================================================
     pdf.set_font("Arial", 'B', 14)
     pdf.set_text_color(31, 73, 125)
@@ -410,18 +472,31 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         df_a_period = df_act[(df_act['FECHA'].dt.date >= s_date) & (df_act['FECHA'].dt.date <= e_date)]
         if not df_a_period.empty:
             resumen_act = df_a_period.groupby('TAREA')['HORAS'].sum().reset_index().sort_values('HORAS', ascending=False)
+            
             pdf.set_font("Arial", 'B', 9)
             pdf.set_fill_color(31, 73, 125)
             pdf.set_text_color(255, 255, 255)
             pdf.cell(140, 7, "ACTIVIDAD / TAREA", border=1, fill=True)
-            pdf.cell(30, 7, "HS TOTALES", border=1, align='C', ln=True, fill=True)
+            pdf.cell(35, 7, "HS TOTALES", border=1, align='C', ln=True, fill=True)
 
             pdf.set_font("Arial", '', 9)
             pdf.set_text_color(0, 0, 0)
+            total_hs_act = 0
+
             for _, row in resumen_act.iterrows():
+                total_hs_act += row['HORAS']
                 pdf.cell(140, 7, clean_text(str(row['TAREA'])[:80]), border=1)
                 hs_txt = str(int(row['HORAS'])) if row['HORAS'] == int(row['HORAS']) else f"{row['HORAS']:.1f}"
-                pdf.cell(30, 7, hs_txt, border=1, align='C', ln=True)
+                pdf.cell(35, 7, hs_txt, border=1, align='C', ln=True)
+
+            # FILA DE TOTALES
+            pdf.set_font("Arial", 'B', 9)
+            pdf.set_fill_color(220, 220, 220)
+            pdf.cell(140, 7, "TOTAL HORAS ASISTENCIA", border=1, align='R', fill=True)
+            
+            t_hs_act_txt = str(int(total_hs_act)) if total_hs_act == int(total_hs_act) else f"{total_hs_act:.1f}"
+            pdf.cell(35, 7, t_hs_act_txt, border=1, align='C', ln=True, fill=True)
+
         else:
             pdf.set_font("Arial", '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -444,7 +519,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
 st.write("") 
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 with col_btn2:
-    if st.button("🖨️ Procesar y Generar PDF Completo", type="primary", use_container_width=True):
+    if st.button("🖨️ Procesar y Generar PDF", type="primary", use_container_width=True):
         with st.spinner("Construyendo documento PDF..."):
             try:
                 pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date)
