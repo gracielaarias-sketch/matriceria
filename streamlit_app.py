@@ -23,7 +23,7 @@ st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Estado 
 st.divider()
 
 # ==========================================
-# 2. EXTRACCIÓN ESTRICTA DESDE FORMS
+# 2. EXTRACCIÓN INTELIGENTE Y A PRUEBA DE FALLOS
 # ==========================================
 SHEETS_CONFIG = [
     # ASISTENCIA
@@ -38,7 +38,7 @@ SHEETS_CONFIG = [
 ]
 
 def clean_matricero(name):
-    """Agrupa al matricero por su Legajo para evitar que la misma persona aparezca dos veces"""
+    """Agrupa al matricero por su Legajo para evitar que la misma persona aparezca dividida"""
     name = str(name).upper().strip()
     name = re.sub(r'\s+', ' ', name)
     match = re.match(r'^(\d+)\s*[-_]?\s*(.*)', name)
@@ -53,83 +53,105 @@ def load_data():
         try:
             df = pd.read_csv(config["url"], skiprows=config["skiprows"])
             
-            # Limpieza exhaustiva de encabezados: todo a mayúsculas, un solo espacio entre palabras
+            # 1. Limpieza estricta de encabezados
             df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
 
-            # Evitar error de columnas duplicadas en Pandas (agrega .1, .2)
+            # Evitar error de Pandas con columnas duplicadas renombrándolas
             cols = pd.Series(df.columns)
             for dup in cols[cols.duplicated()].unique():
                 cols[cols[cols == dup].index.values.tolist()] = [f"{dup}.{i}" if i != 0 else dup for i in range(sum(cols == dup))]
             df.columns = cols
-            
-            # Columnas base estables (Ignorando cualquier columna manual que empiece con "1 -")
-            c_fecha = next((c for c in df.columns if c == 'FECHA'), None)
-            c_mat = next((c for c in df.columns if c == 'MATRICERO'), None)
-            
-            if not c_fecha or not c_mat: 
-                continue
-
-            # Buscar columnas NATIVAS del formulario que piden las horas
-            c_horas = [c for c in df.columns if ('HS REALIZADAS' in c or 'HORAS REALIZADAS' in c) and 'TOTAL' not in c]
-            
-            # Buscar columnas de Piezas/Clientes
-            c_piezas = [c for c in df.columns if c.startswith('PIEZA') or c.startswith('NUMERO DE PIEZA')]
-            
-            # Buscar estado de Mantenimiento
-            c_term = next((c for c in df.columns if 'TERMINADO' in c or 'TERMINO' in c), None)
+            df_cols = df.columns.tolist()
 
             # --- EXTRACCIÓN FILA POR FILA ---
             for idx, row in df.iterrows():
-                fecha = str(row[c_fecha]).strip()
-                mat = str(row[c_mat]).strip()
-                
-                # Ignorar filas vacías
-                if fecha in ['NAN', 'NONE', ''] or mat in ['NAN', 'NONE', '']: 
-                    continue
+                # BUSCAR FECHA (Formulario o Manual)
+                fecha = None
+                for cf in ['FECHA', '1 - FECHA']:
+                    if cf in df_cols and pd.notna(row[cf]) and str(row[cf]).strip() not in ['', 'NAN', 'NONE']:
+                        fecha = str(row[cf]).strip()
+                        break
+                if not fecha: continue
 
+                # BUSCAR MATRICERO (Formulario o Manual)
+                mat = None
+                for cm in ['MATRICERO', '1 - MATRICERO']:
+                    if cm in df_cols and pd.notna(row[cm]) and str(row[cm]).strip() not in ['', 'NAN', 'NONE']:
+                        mat = str(row[cm]).strip()
+                        break
+                if not mat: continue
                 mat = clean_matricero(mat)
 
-                # Sumar las horas exactas de esta fila según el formulario
-                row_hs = 0.0
-                for ch in c_horas:
+                # BUSCAR HORAS (Prioridad Formulario -> Fallback Manual)
+                horas = 0.0
+                c_horas_form = [c for c in df_cols if ('HS REALIZADAS' in c or 'HORAS REALIZADAS' in c) and 'TOTAL' not in c and '1 -' not in c]
+                for ch in c_horas_form:
                     try:
-                        val = float(str(row[ch]).replace(',', '.'))
-                        if not pd.isna(val): row_hs += val
+                        v = float(str(row[ch]).replace(',', '.'))
+                        if not pd.isna(v): horas += v
                     except: pass
                 
-                # Si no cargaron horas, se ignora
-                if row_hs == 0: 
-                    continue
+                # Si el formulario está vacío, leer columnas de resumen manuales
+                if horas == 0.0:
+                    for ch_sum in ['1 - HORAS', 'TOTAL HS', 'HORAS', 'HS']:
+                        if ch_sum in df_cols:
+                            try:
+                                v = float(str(row[ch_sum]).replace(',', '.'))
+                                if not pd.isna(v) and v > 0:
+                                    horas = v
+                                    break
+                            except: pass
+                
+                if horas == 0.0: continue
 
-                # 1. ENVIAR A CALENDARIO
-                cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': row_hs})
+                # 1. ALIMENTAR CALENDARIO
+                cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas})
 
-                # 2. ENVIAR A MANTENIMIENTO
+                # 2. ALIMENTAR MANTENIMIENTO
                 if config['tipo'] in ['preventivo', 'correctivo']:
                     estado = 'NO'
-                    if c_term:
-                        val_t = str(row[c_term]).strip().upper()
-                        if 'SI' in val_t or 'SÍ' in val_t: estado = 'SI'
-                        elif 'NO' in val_t: estado = 'NO'
-
+                    c_terms = [c for c in df_cols if 'TERMINADO' in c or 'TERMINO' in c]
+                    for ct in reversed(c_terms): 
+                        val_t = str(row[ct]).strip().upper()
+                        if 'SI' in val_t or 'SÍ' in val_t: 
+                            estado = 'SI'
+                            break
+                        elif 'NO' in val_t:
+                            estado = 'NO'
+                    
                     piezas_found = []
                     # Barrido Horizontal de Clientes
-                    for i, cp in enumerate(df.columns):
-                        if cp in c_piezas:
+                    piezas_candidatas = [c for c in df_cols if ('PIEZA' in c or 'MATRIZ' in c) and not any(x in c for x in ['TIPO', 'LIMPIEZA', 'CERRAMIENTO', '[', '?', 'MANTENIMIENTO', '1 -'])]
+                    for i, cp in enumerate(df_cols):
+                        if cp in piezas_candidatas:
                             pieza_val = str(row[cp]).strip()
                             if pieza_val and pieza_val not in ['NAN', 'NONE', '-', '']:
                                 op_val = '-'
-                                # Buscar la Operación en las siguientes 3 columnas a la derecha
-                                for n_c in df.columns[i+1:i+4]:
+                                # Buscar la Operación al lado de la pieza
+                                for n_c in df_cols[i+1:i+4]:
                                     if 'OPERACION' in n_c or 'OPERACIÓN' in n_c:
                                         t_op = str(row[n_c]).strip()
                                         if t_op and t_op not in ['NAN', 'NONE', '-', '']: op_val = t_op
                                         break
                                 piezas_found.append({'matriz': pieza_val, 'op': op_val})
-
-                    # Repartir horas si cargaron varias matrices en una sola fila (Ej: 8 horas para 2 matrices = 4h c/u)
+                    
+                    # Fallback Manual si el formulario está vacío
+                    if not piezas_found:
+                        p_val, o_val = None, '-'
+                        for cp_sum in ['1 - PIEZA', 'MATRIZ']:
+                            if cp_sum in df_cols:
+                                v = str(row[cp_sum]).strip()
+                                if v and v not in ['NAN', 'NONE', '-', '']: p_val = v
+                                break
+                        for co_sum in ['1 - OPERACION', 'OPERACION']:
+                            if co_sum in df_cols:
+                                v = str(row[co_sum]).strip()
+                                if v and v not in ['NAN', 'NONE', '-', '']: o_val = v
+                                break
+                        if p_val: piezas_found.append({'matriz': p_val, 'op': o_val})
+                    
                     if piezas_found:
-                        hs_per_piece = row_hs / len(piezas_found)
+                        hs_per_piece = horas / len(piezas_found)
                         for p in piezas_found:
                             mant_data.append({
                                 'FECHA': fecha, 'MATRICERO': mat, 'MATRIZ': p['matriz'], 
@@ -137,23 +159,35 @@ def load_data():
                                 'HORAS': hs_per_piece, 'TERMINADO': estado
                             })
 
-                # 3. ENVIAR A ASISTENCIA
+                # 3. ALIMENTAR ASISTENCIA
                 elif config['tipo'] == 'asistencia':
-                    # Identificar si hay múltiples tareas cargadas
-                    for ch in c_horas:
-                        # Extraer el número de la tarea ("TAREA 1", "TAREA 2")
-                        match = re.search(r'TAREA\s*(\d+)', ch)
+                    tasks_found = []
+                    task_cols = [c for c in df_cols if 'TAREA' in c and 'HS' not in c and 'OBS' not in c and 'DESEA' not in c and '1 -' not in c]
+                    for t_col in task_cols:
+                        match = re.search(r'TAREA\s*(\d+)', t_col)
                         if match:
-                            num = match.group(1)
-                            # Buscar la columna que detalla esa tarea específica
-                            c_t = next((c for c in df.columns if f'TAREA {num}' in c and 'HS' not in c and 'OBS' not in c and 'DESEA' not in c), None)
-                            if c_t:
-                                t_val = str(row[c_t]).strip()
+                            t_num = match.group(1)
+                            h_col = next((c for c in df_cols if f'TAREA {t_num}' in c and 'HS' in c), None)
+                            t_val = str(row[t_col]).strip()
+                            if t_val and t_val not in ['NAN', 'NONE', ''] and h_col:
                                 try:
-                                    h_val = float(str(row[ch]).replace(',', '.'))
-                                    if h_val > 0 and t_val and t_val not in ['NAN', 'NONE']:
-                                        act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val})
+                                    h_val = float(str(row[h_col]).replace(',', '.'))
+                                    if h_val > 0: tasks_found.append({'tarea': t_val, 'horas': h_val})
                                 except: pass
+                    
+                    # Fallback Manual
+                    if not tasks_found:
+                        t_val = None
+                        for ct_sum in ['TAREAS', 'PRIMER TAREA', '1 - TAREA 1', 'TAREAS REALIZADAS']:
+                            if ct_sum in df_cols:
+                                v = str(row[ct_sum]).strip()
+                                if v and v not in ['NAN', 'NONE', '-', '']:
+                                    t_val = v
+                                    break
+                        if t_val: tasks_found.append({'tarea': t_val, 'horas': horas})
+                    
+                    for t in tasks_found:
+                        act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t['tarea'], 'HORAS': t['horas']})
 
         except Exception as e:
             print(f"Error procesando {config['url']}: {e}")
@@ -246,7 +280,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         return pdf.output(dest='S').encode('latin-1')
 
     # =========================================================
-    # PARTE 1: RESUMEN Y CALENDARIOS POR MES
+    # PARTE 1: RESUMEN LIMPIO Y CALENDARIOS POR MES
     # =========================================================
     for (year, month), dates_in_month in months_dict.items():
         pdf.add_page()
@@ -263,7 +297,6 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         pdf.set_text_color(255, 255, 255)
         pdf.cell(196, 6, "TABLA GENERAL DE HORAS POR MATRICERO", border=1, ln=True, align='C', fill=True)
 
-        # CABECERAS (SIN AUSENCIAS NI EXTRAS)
         pdf.set_fill_color(31, 73, 125)
         pdf.cell(70, 6, "MATRICERO", border=1, align='C', fill=True)
         pdf.cell(40, 6, "ESTIMADO DE HS", border=1, align='C', fill=True)
@@ -423,7 +456,6 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
             
             pdf.cell(40, 7, clean_text(estado_print), border=1, align='C', ln=True)
 
-        # FILA DE TOTALES POR TIPO
         pdf.set_font("Arial", 'B', 9)
         pdf.set_fill_color(220, 220, 220)
         pdf.set_text_color(0, 0, 0)
@@ -492,7 +524,6 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
                 hs_txt = str(int(row['HORAS'])) if row['HORAS'] == int(row['HORAS']) else f"{row['HORAS']:.1f}"
                 pdf.cell(35, 7, hs_txt, border=1, align='C', ln=True)
 
-            # FILA DE TOTAL DE HORAS ASISTENCIA
             pdf.set_font("Arial", 'B', 9)
             pdf.set_fill_color(220, 220, 220)
             pdf.cell(140, 7, "TOTAL HORAS ASISTENCIA", border=1, align='R', fill=True)
