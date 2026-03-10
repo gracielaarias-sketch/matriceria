@@ -1,10 +1,3 @@
-¡Perfecto! He limpiado la lista MATRICES_CONTROL eliminando todas las piezas que comenzaban con "N" (o "n").
-
-Como en el mensaje anterior el código se cortó al final por la longitud, aquí te entrego el código completo y definitivo de app.py. Asegúrate de copiarlo íntegro desde el import inicial hasta la línea final de manejo de errores.
-
-Reemplaza todo el contenido de tu archivo por este:
-
-Python
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
