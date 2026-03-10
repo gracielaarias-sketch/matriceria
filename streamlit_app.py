@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Cálculo de horas de matricería (Extracción Nativa Exacta).</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cálculo de horas de matricería.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
