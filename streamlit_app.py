@@ -17,7 +17,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Calendario de Horas de Matricería</div>', unsafe_allow_html=True)
-st.write("Generador de PDF usando FPDF (Sin dependencias externas)")
+st.write("Generador de PDF consolidado desde Google Sheets")
 st.divider()
 
 # ==========================================
@@ -37,35 +37,56 @@ def load_data():
     all_data = []
     for config in SHEETS_CONFIG:
         try:
+            # Leer el CSV desde Google Sheets
             df = pd.read_csv(config["url"], skiprows=config["skiprows"])
+            
+            # 1. Estandarizar nombres de columnas
             df.columns = df.columns.astype(str).str.upper().str.strip()
             
+            # 2. Eliminar columnas duplicadas para evitar InvalidIndexError
+            df = df.loc[:, ~df.columns.duplicated()].copy()
+            
+            # 3. Buscar las columnas clave
             col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
             col_mat = next((c for c in df.columns if 'MATRICERO' in c), None)
-            cols_horas = [c for c in df.columns if 'HORAS' in c or 'HS' in c.split()]
+            
+            # Buscar columnas de horas evitando sumar el TOTAL si hay subtareas
+            cols_horas = [c for c in df.columns if ('HORAS' in c or 'HS' in c.split() or 'HS' in c) and 'TOTAL' not in c]
+            
+            # Si no hay subtareas, buscar la columna que diga TOTAL
+            if not cols_horas:
+                cols_horas = [c for c in df.columns if 'TOTAL' in c and ('HS' in c or 'HORAS' in c)]
             
             if col_fecha and col_mat and cols_horas:
-                df_clean = df[[col_fecha, col_mat] + cols_horas].copy()
-                for col in cols_horas:
-                    df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0)
+                # Sumar las horas de forma segura
+                horas_sum = pd.to_numeric(df[cols_horas[0]], errors='coerce').fillna(0)
+                if len(cols_horas) > 1:
+                    for col in cols_horas[1:]:
+                        horas_sum += pd.to_numeric(df[col], errors='coerce').fillna(0)
                 
-                df_clean['TOTAL_HORAS'] = df_clean[cols_horas].sum(axis=1)
-                df_clean = df_clean.rename(columns={col_fecha: 'FECHA', col_mat: 'MATRICERO'})
-                df_clean = df_clean[['FECHA', 'MATRICERO', 'TOTAL_HORAS']]
+                # 4. Crear un DataFrame limpio solo con lo necesario
+                df_clean = pd.DataFrame({
+                    'FECHA': df[col_fecha],
+                    'MATRICERO': df[col_mat],
+                    'TOTAL_HORAS': horas_sum
+                })
                 all_data.append(df_clean)
+                
         except Exception as e:
-            pass # Ignoramos errores individuales para no romper la app
+            pass # Ignoramos errores individuales silenciosamente para no detener la app
             
     if not all_data:
         return pd.DataFrame()
         
+    # Unir todo y limpiar
     master_df = pd.concat(all_data, ignore_index=True)
     master_df['FECHA'] = pd.to_datetime(master_df['FECHA'], errors='coerce', dayfirst=True)
     master_df['MATRICERO'] = master_df['MATRICERO'].astype(str).str.strip().str.upper()
     master_df = master_df.dropna(subset=['FECHA'])
     
-    # Agrupar
+    # Agrupar las horas del mismo matricero en el mismo día
     master_df = master_df.groupby(['FECHA', 'MATRICERO'], as_index=False)['TOTAL_HORAS'].sum()
+    
     return master_df
 
 df_raw = load_data()
@@ -84,10 +105,10 @@ with col1:
     st.info(f"Rango: {start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}")
 
 if df_raw.empty:
-    st.warning("No hay datos cargados en la base principal.")
+    st.warning("No hay datos cargados en la base principal. Verifica los enlaces o el formato.")
     st.stop()
 
-# Filtrar y armar el Pivot (Calendario)
+# Filtrar y armar la tabla dinámica (Pivot)
 mask = (df_raw['FECHA'].dt.date >= start_date) & (df_raw['FECHA'].dt.date <= end_date)
 df_filtered = df_raw.loc[mask].copy()
 
@@ -106,7 +127,7 @@ if not df_filtered.empty:
         fill_value=0
     )
     
-    # Ordenar columnas por fecha (basado en el texto 'DD/MM')
+    # Ordenar columnas cronológicamente extrayendo la fecha del string
     pivot_df = pivot_df[sorted(pivot_df.columns, key=lambda x: datetime.strptime(x.split(' ')[1], '%d/%m'))]
     pivot_df = pivot_df.reset_index()
 
@@ -173,7 +194,7 @@ def build_pdf(df_pivot, s_date, e_date):
                 
                 # Lógica de colores igual a la imagen
                 if val == 0:
-                    pdf.set_fill_color(127, 127, 127) # Gris
+                    pdf.set_fill_color(127, 127, 127) # Gris oscuro
                     pdf.set_text_color(255, 255, 255)
                 elif val == 8:
                     pdf.set_fill_color(198, 239, 206) # Verde
@@ -206,10 +227,21 @@ with col2:
         st.info("No hay datos en esta semana. Selecciona otra fecha.")
     else:
         st.write("**Vista previa de los datos:**")
-        st.dataframe(pivot_df, use_container_width=True, hide_index=True)
+        
+        # Dar estilo a la vista previa en pantalla para que coincida con el PDF
+        def color_cells(val):
+            if isinstance(val, str):
+                return ''
+            if val == 0: return 'background-color: #7f7f7f; color: white;'
+            elif val == 8: return 'background-color: #c6efce; color: #006100;'
+            elif val > 8: return 'background-color: #ffc7ce; color: #9c0006;'
+            else: return 'background-color: #ffeb9c; color: #9c6500;'
+
+        styled_df = pivot_df.style.applymap(color_cells, subset=pivot_df.columns[1:])
+        st.dataframe(styled_df, use_container_width=True, hide_index=True)
         
         st.write("")
-        if st.button("🖨️ Generar PDF", type="primary"):
+        if st.button("🖨️ Generar y Descargar PDF", type="primary"):
             with st.spinner("Construyendo documento PDF..."):
                 try:
                     pdf_data = build_pdf(pivot_df, start_date, end_date)
