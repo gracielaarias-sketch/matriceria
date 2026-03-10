@@ -281,10 +281,21 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         pdf.cell(46, 6, "FALTANTE / DIFERENCIA", border=1, align='C', ln=True, fill=True)
 
         pdf.set_font("Arial", 'B', 9)
+        
+        # Variables para los Totales Generales
+        total_estimado = 0
+        total_cargadas = 0
+        total_diferencia = 0
+
         for mat in all_matriceros:
             df_mat = df_datos[df_datos['MATRICERO'] == mat]
             reported = sum(df_mat[df_mat['FECHA'].dt.date == d]['TOTAL_HORAS'].sum() for d in dates_in_month)
             diff = reported - estimated_hs
+
+            # Sumar al total general
+            total_estimado += estimated_hs
+            total_cargadas += reported
+            total_diferencia += diff
 
             pdf.set_fill_color(240, 240, 240)
             pdf.set_text_color(0, 0, 0)
@@ -303,6 +314,26 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
             sign = "+" if diff > 0 else ""
             t_diff = f"{sign}{int(diff)}" if diff == int(diff) else f"{sign}{diff:.1f}"
             pdf.cell(46, 6, t_diff, border=1, align='C', ln=True, fill=True)
+
+        # IMPRIMIR FILA DE TOTALES
+        pdf.set_font("Arial", 'B', 9)
+        pdf.set_fill_color(220, 220, 220)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(70, 7, "TOTAL GENERAL", border=1, align='R', fill=True)
+        
+        pdf.cell(40, 7, str(int(total_estimado)), border=1, align='C', fill=True)
+        
+        t_rep_tot = str(int(total_cargadas)) if total_cargadas == int(total_cargadas) else f"{total_cargadas:.1f}"
+        pdf.cell(40, 7, t_rep_tot, border=1, align='C', fill=True)
+
+        if total_diferencia < 0: pdf.set_text_color(192, 0, 0) 
+        elif total_diferencia > 0: pdf.set_text_color(0, 128, 0)
+        else: pdf.set_text_color(0, 0, 0)
+        
+        sign_tot = "+" if total_diferencia > 0 else ""
+        t_diff_tot = f"{sign_tot}{int(total_diferencia)}" if total_diferencia == int(total_diferencia) else f"{sign_tot}{total_diferencia:.1f}"
+        pdf.cell(46, 7, t_diff_tot, border=1, align='C', ln=True, fill=True)
+
 
         # CALENDARIOS SEMANALES
         pdf.add_page()
