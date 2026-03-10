@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Extracción Estricta desde Google Forms (Fumiscor + Famma).</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Extracción Posicional Estricta desde Google Forms (Agrupación Corregida).</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -27,14 +27,14 @@ st.divider()
 # ==========================================
 SHEETS_CONFIG = [
     # ASISTENCIA
-    {"url": "https://docs.google.com/spreadsheets/d/1sccnOPuosjMSepp0FZoEGteYArIIhB2fGH7TeSRW_7E/export?format=csv&gid=1128388185", "skiprows": 2, "tipo": "asistencia"}, # Fumiscor
-    {"url": "https://docs.google.com/spreadsheets/d/1UNSCxrTy9TUdggNt0ta0TcsEvT3idaRGWcXE_t8J40I/export?format=csv&gid=979884533", "skiprows": 0, "tipo": "asistencia"}, # Famma
+    {"url": "https://docs.google.com/spreadsheets/d/1sccnOPuosjMSepp0FZoEGteYArIIhB2fGH7TeSRW_7E/export?format=csv&gid=1128388185", "skiprows": 2, "tipo": "asistencia"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1UNSCxrTy9TUdggNt0ta0TcsEvT3idaRGWcXE_t8J40I/export?format=csv&gid=979884533", "skiprows": 0, "tipo": "asistencia"}, 
     # CORRECTIVOS
-    {"url": "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893", "skiprows": 2, "tipo": "correctivo"}, # Fumiscor
-    {"url": "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679", "skiprows": 0, "tipo": "correctivo"}, # Famma
+    {"url": "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893", "skiprows": 2, "tipo": "correctivo"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679", "skiprows": 0, "tipo": "correctivo"}, 
     # PREVENTIVOS
-    {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990", "skiprows": 2, "tipo": "preventivo"}, # Fumiscor
-    {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo"} # Famma
+    {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990", "skiprows": 2, "tipo": "preventivo"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo"} 
 ]
 
 # Columnas exactas del formulario donde el matricero elige la pieza
@@ -49,6 +49,10 @@ def clean_text_standard(text):
     text = str(text).upper().strip()
     return re.sub(r'\s+', ' ', text)
 
+def is_valid_matricero(text):
+    """Verifica si el texto cumple con el formato de Legajo (Ej: 900224 - PUSZKARKY JORGE)"""
+    return bool(re.match(r'^(\d+)\s*[-_]?\s*(.*)', str(text).strip()))
+
 def clean_matricero(name):
     """Estandariza el nombre del matricero usando su Legajo."""
     name = clean_text_standard(name)
@@ -57,7 +61,7 @@ def clean_matricero(name):
     return name
 
 # ==========================================
-# 3. MOTOR DE EXTRACCIÓN 
+# 3. MOTOR DE EXTRACCIÓN POSICIONAL
 # ==========================================
 @st.cache_data(ttl=300)
 def load_data():
@@ -77,20 +81,29 @@ def load_data():
             df.columns = cols
             df_cols = df.columns.tolist()
 
-            # Buscar índice exacto de Fecha y Matricero
+            # Buscar índice de Fecha (siempre suele estar al principio)
             idx_fecha = next((i for i, c in enumerate(df_cols) if c == 'FECHA'), None)
-            idx_mat = next((i for i, c in enumerate(df_cols) if c == 'MATRICERO'), None)
             
-            if idx_fecha is None or idx_mat is None: 
+            if idx_fecha is None: 
                 continue
 
-            # --- LECTURA FILA POR FILA ---
+            # --- LECTURA FILA POR FILA POR POSICIÓN ---
             for _, row in df.iterrows():
                 fecha = str(row.iloc[idx_fecha]).strip()
-                mat = str(row.iloc[idx_mat]).strip()
-                
-                if fecha in ['NAN', 'NONE', ''] or mat in ['NAN', 'NONE', '']: 
+                if fecha in ['NAN', 'NONE', '']: 
                     continue
+
+                # BÚSQUEDA INTELIGENTE DEL MATRICERO EN TODA LA FILA
+                # (En Preventivos Fumiscor está al final de todo)
+                mat = None
+                for cell in row:
+                    if is_valid_matricero(cell):
+                        mat = str(cell).strip()
+                        break
+                
+                if not mat: 
+                    continue
+                    
                 mat = clean_matricero(mat)
 
                 # ====================================================
@@ -147,23 +160,16 @@ def load_data():
                         cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas})
 
                 # ====================================================
-                # ASISTENCIA (EMPAREJAMIENTO DINÁMICO DE TAREAS Y HORAS)
+                # ASISTENCIA (MULTITAREAS)
                 # ====================================================
                 elif config['tipo'] == 'asistencia':
                     horas_asist_totales = 0.0
-                    
-                    # Iterar por los 4 campos de tareas posibles
-                    for i in range(1, 5):
-                        # Encontrar la columna de la Tarea 1, 2, 3, 4
-                        idx_tarea = next((idx for idx, c in enumerate(df_cols) if (f'{i} - TAREA' in c or f'TAREA {i}' in c) and 'HS' not in c and 'OBS' not in c and 'DESEA' not in c), None)
-                        # Encontrar la columna de Horas de esa Tarea específica (así ignoramos las intercaladas de Famma)
-                        idx_hs = next((idx for idx, c in enumerate(df_cols) if f'TAREA {i}' in c and ('HS' in c or 'HORAS' in c)), None)
-
-                        if idx_tarea is not None and idx_hs is not None:
-                            t_val = clean_text_standard(row.iloc[idx_tarea])
+                    for i, col_name in enumerate(df_cols):
+                        if 'TAREA' in col_name and 'HS' not in col_name and 'OBS' not in col_name and 'DESEA' not in col_name and re.search(r'\d', col_name):
+                            t_val = clean_text_standard(row.iloc[i])
                             
                             if t_val and t_val not in ['NAN', 'NONE', '-']:
-                                raw_hs = str(row.iloc[idx_hs]).lower().replace(',', '.')
+                                raw_hs = str(row.iloc[i+1]).lower().replace(',', '.')
                                 raw_hs = re.sub(r'[^\d.]', '', raw_hs)
                                 try:
                                     if raw_hs:
