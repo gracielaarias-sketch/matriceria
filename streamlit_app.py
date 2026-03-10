@@ -18,7 +18,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Mensual de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Selecciona el rango de fechas. El sistema organizará automáticamente un mes por hoja, incluyendo Sábados y Domingos en el cálculo de horas extra.</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>El resumen y los calendarios se separarán en hojas distintas sin cortar las tablas.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -106,6 +106,8 @@ class PDF(FPDF):
     def __init__(self, start_date, end_date):
         super().__init__(orientation='L', unit='mm', format='A4')
         self.rango = f"{start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}"
+        # Activar el salto automático de página para manejar listas largas de matriceros
+        self.set_auto_page_break(auto=True, margin=15)
         
     def header(self):
         self.set_font("Arial", 'B', 16)
@@ -153,14 +155,14 @@ def build_pdf(df_datos, s_date, e_date):
     for (year, month), dates_in_month in months_dict.items():
         pdf.add_page()
         
-        # Título del Mes
+        # Título del Mes - Hoja de Resumen
         pdf.set_font("Arial", 'B', 14)
         pdf.set_text_color(31, 73, 125)
-        pdf.cell(0, 8, f"{meses_es[month]} {year}", ln=True, align='L')
+        pdf.cell(0, 8, f"RESUMEN MENSUAL: {meses_es[month]} {year}", ln=True, align='L')
         pdf.ln(2)
 
         # ---------------------------------------------
-        # TABLA DE RESUMEN MENSUAL
+        # HOJA 1: TABLA DE RESUMEN MENSUAL
         # ---------------------------------------------
         working_days = sum(1 for d in dates_in_month if d.weekday() < 5)
         estimated_hs = working_days * 8
@@ -168,7 +170,7 @@ def build_pdf(df_datos, s_date, e_date):
         pdf.set_font("Arial", 'B', 8)
         pdf.set_fill_color(0, 0, 0)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(196, 6, "RESUMEN", border=1, ln=True, align='C', fill=True)
+        pdf.cell(196, 6, "RESUMEN DE ASISTENCIA Y HORAS EXTRAS", border=1, ln=True, align='C', fill=True)
 
         pdf.set_fill_color(31, 73, 125)
         pdf.cell(50, 6, "MATRICERO", border=1, align='C', fill=True)
@@ -187,7 +189,6 @@ def build_pdf(df_datos, s_date, e_date):
             ausencias = 0
             reported = 0
             
-            # Cálculo de horas exactas día por día
             for d in dates_in_month:
                 val_series = df_mat[df_mat['FECHA'].dt.date == d]['TOTAL_HORAS']
                 val = val_series.sum() if not val_series.empty else 0
@@ -203,58 +204,62 @@ def build_pdf(df_datos, s_date, e_date):
 
             diff = reported - estimated_hs
 
-            # Dibujar Fila
             pdf.set_fill_color(240, 240, 240)
             pdf.set_text_color(0, 0, 0)
             pdf.cell(50, 6, clean_text(mat[:25]), border=1, fill=True)
 
             pdf.set_fill_color(255, 255, 255)
             
-            # Ausencias (vacío si es 0)
             t_aus = str(int(ausencias)) if ausencias == int(ausencias) else f"{ausencias:.1f}"
             pdf.cell(26, 6, t_aus if ausencias > 0 else "", border=1, align='C', fill=True)
             
-            # Extras (vacío si es 0)
             t_ext = str(int(hs_extra)) if hs_extra == int(hs_extra) else f"{hs_extra:.1f}"
             pdf.cell(26, 6, t_ext if hs_extra > 0 else "", border=1, align='C', fill=True)
             
-            # Estimadas y Reportadas
             pdf.cell(32, 6, str(estimated_hs), border=1, align='C', fill=True)
             t_rep = str(int(reported)) if reported == int(reported) else f"{reported:.1f}"
             pdf.cell(34, 6, t_rep, border=1, align='C', fill=True)
 
-            # Diferencia (Color)
-            if diff < 0: pdf.set_text_color(192, 0, 0) # Rojo
-            elif diff > 0: pdf.set_text_color(0, 128, 0) # Verde
+            if diff < 0: pdf.set_text_color(192, 0, 0) 
+            elif diff > 0: pdf.set_text_color(0, 128, 0)
             else: pdf.set_text_color(0, 0, 0)
             
             sign = "+" if diff > 0 else ""
             t_diff = f"{sign}{int(diff)}" if diff == int(diff) else f"{sign}{diff:.1f}"
             pdf.cell(28, 6, t_diff, border=1, align='C', ln=True, fill=True)
 
-        pdf.ln(6) 
+        # ---------------------------------------------
+        # HOJA 2: TABLAS SEMANALES (CALENDARIO)
+        # ---------------------------------------------
+        # Forzar un salto de página para iniciar el calendario limpio
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 14)
+        pdf.set_text_color(31, 73, 125)
+        pdf.cell(0, 8, f"CALENDARIO SEMANAL: {meses_es[month]} {year}", ln=True, align='L')
+        pdf.ln(2)
 
-        # ---------------------------------------------
-        # TABLAS SEMANALES (SIEMPRE LUN-DOM)
-        # ---------------------------------------------
         weeks_dict = {}
         for d in dates_in_month:
             w = d.isocalendar()[1]
             if w not in weeks_dict:
-                # Construir la semana completa (Lunes a Domingo)
                 monday = d - timedelta(days=d.weekday())
                 weeks_dict[w] = [monday + timedelta(days=i) for i in range(7)]
 
         w_mat = 50
         w_day = 30 
-        total_w = w_mat + (7 * w_day) # 260mm (Entra perfecto en A4 Apaisado)
+        total_w = w_mat + (7 * w_day)
+
+        # Altura dinámica: 6 (Cabecera negra) + 10 (Cabecera azul) + (N * 8) (filas matriceros) + 5 (margen final)
+        required_height = 6 + 10 + (len(all_matriceros) * 8) + 5
 
         for week_num, full_week in weeks_dict.items():
-            if pdf.get_y() > 160: # Salto de página
+            
+            # Chequear si la tabla entera entra en el espacio restante de la página (Límite usable A4 apaisado: ~185mm)
+            if pdf.get_y() + required_height > 185: 
                 pdf.add_page()
-                pdf.set_font("Arial", 'B', 10)
+                pdf.set_font("Arial", 'B', 12)
                 pdf.set_text_color(31, 73, 125)
-                pdf.cell(0, 8, f"{meses_es[month]} {year} (Continuación)", ln=True, align='L')
+                pdf.cell(0, 8, f"CALENDARIO SEMANAL: {meses_es[month]} {year} (Continuación)", ln=True, align='L')
                 pdf.ln(2)
 
             pdf.set_font("Arial", 'B', 9)
@@ -262,24 +267,20 @@ def build_pdf(df_datos, s_date, e_date):
             pdf.set_text_color(255, 255, 255)
             pdf.cell(total_w, 6, f"SEMANA {week_num}", border=1, ln=True, align='C', fill=True)
 
-            # Cabecera doble (Día y Fecha)
             pdf.set_fill_color(31, 73, 125)
             x_start = pdf.get_x()
             pdf.cell(w_mat, 10, "MATRICERO", border=1, align='C', fill=True)
             x_days = pdf.get_x()
             
-            # Fila Superior: Nombres
             for d in full_week:
                 pdf.cell(w_day, 5, clean_text(dias_espanol[d.weekday()]), border='LTR', align='C', fill=True)
             pdf.ln()
             
-            # Fila Inferior: Fechas
             pdf.set_x(x_days) 
             for d in full_week:
                 pdf.cell(w_day, 5, d.strftime('%d/%m/%Y'), border='LBR', align='C', fill=True)
             pdf.ln()
 
-            # Horas Semanales
             pdf.set_font("Arial", 'B', 9)
             for mat in all_matriceros:
                 pdf.set_fill_color(240, 240, 240)
@@ -293,16 +294,16 @@ def build_pdf(df_datos, s_date, e_date):
                     val = val_series.sum() if not val_series.empty else 0
 
                     if val == 0:
-                        pdf.set_fill_color(127, 127, 127) # Gris
+                        pdf.set_fill_color(127, 127, 127) 
                         pdf.set_text_color(255, 255, 255)
                     elif val == 8:
-                        pdf.set_fill_color(198, 239, 206) # Verde
+                        pdf.set_fill_color(198, 239, 206) 
                         pdf.set_text_color(0, 97, 0)
                     elif val > 8:
-                        pdf.set_fill_color(255, 199, 206) # Rojo
+                        pdf.set_fill_color(255, 199, 206) 
                         pdf.set_text_color(156, 0, 6)
                     else:
-                        pdf.set_fill_color(255, 235, 156) # Amarillo
+                        pdf.set_fill_color(255, 235, 156) 
                         pdf.set_text_color(156, 101, 0)
 
                     txt_val = str(int(val)) if val == int(val) else f"{val:.1f}"
@@ -324,7 +325,7 @@ st.write("")
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 with col_btn2:
     if st.button("🖨️ Procesar y Generar PDF", type="primary", use_container_width=True):
-        with st.spinner("Construyendo documento PDF, agrupando por meses..."):
+        with st.spinner("Construyendo documento PDF, organizando páginas..."):
             try:
                 pdf_data = build_pdf(df_raw, start_date, end_date)
                 st.success("¡PDF generado correctamente!")
