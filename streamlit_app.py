@@ -23,7 +23,7 @@ st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Manteni
 st.divider()
 
 # ==========================================
-# 2. EXTRACCIÓN ESTRICTA NATIVA (FORMS)
+# 2. CONFIGURACIÓN DE ENLACES (GIDs)
 # ==========================================
 SHEETS_CONFIG = [
     # ASISTENCIA
@@ -37,6 +37,12 @@ SHEETS_CONFIG = [
     {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv", "skiprows": 0, "tipo": "preventivo"}
 ]
 
+# Nombres exactos de las columnas de clientes para evitar confundir con las preguntas del form
+COLUMNAS_CLIENTES = [
+    'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 'PIEZAS PEUGEOT',
+    'NUMERO DE PIEZA', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT'
+]
+
 def clean_matricero(name):
     """Agrupa al matricero por su Legajo para evitar duplicados."""
     name = str(name).upper().strip()
@@ -45,6 +51,9 @@ def clean_matricero(name):
     if match: return f"{match.group(1)} - {match.group(2).strip()}"
     return name
 
+# ==========================================
+# 3. EXTRACCIÓN ESTRICTA NATIVA (FORMS)
+# ==========================================
 @st.cache_data(ttl=300)
 def load_data():
     cal_data, mant_data, act_data = [], [], []
@@ -53,10 +62,10 @@ def load_data():
         try:
             df = pd.read_csv(config["url"], skiprows=config["skiprows"])
             
-            # Limpieza exhaustiva de encabezados: mayúsculas y espacios simples
+            # Limpieza exhaustiva de encabezados
             df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
 
-            # Evitar error de Pandas renombrando columnas idénticas (agrega .1, .2)
+            # Evitar error de Pandas renombrando columnas idénticas
             cols = pd.Series(df.columns)
             for dup in cols[cols.duplicated()].unique():
                 cols[cols[cols == dup].index.values.tolist()] = [f"{dup}.{i}" if i != 0 else dup for i in range(sum(cols == dup))]
@@ -75,7 +84,6 @@ def load_data():
                 fecha = str(row[c_fecha]).strip()
                 mat = str(row[c_mat]).strip()
                 
-                # Ignorar filas vacías
                 if fecha in ['NAN', 'NONE', ''] or mat in ['NAN', 'NONE', '']: 
                     continue
 
@@ -85,7 +93,8 @@ def load_data():
                 # MANTENIMIENTO: PREVENTIVO / CORRECTIVO
                 # ====================================================
                 if config['tipo'] in ['preventivo', 'correctivo']:
-                    # Buscar la columna exacta de horas que pide el Formulario
+                    
+                    # Extraer Horas
                     c_hs = next((c for c in df_cols if 'HS REALIZADAS' in c and 'TAREA' not in c), None)
                     horas = 0.0
                     if c_hs and pd.notna(row[c_hs]):
@@ -95,23 +104,22 @@ def load_data():
                     
                     if horas <= 0: continue
 
-                    # Estado del Mantenimiento
+                    # Extraer Estado (Terminado SÍ/NO)
                     estado = 'NO'
                     c_term = next((c for c in df_cols if 'TERMINADO' in c or 'TERMINO' in c), None)
                     if c_term and pd.notna(row[c_term]):
                         val_t = str(row[c_term]).upper()
                         if 'SI' in val_t or 'SÍ' in val_t: estado = 'SI'
 
-                    # Barrido Horizontal buscando qué Pieza/Cliente llenaron
-                    piezas_candidatas = [c for c in df_cols if 'PIEZA' in c and 'TIPO' not in c and '1 -' not in c]
                     piezas_found = []
 
+                    # Buscar unicamente en las columnas de clientes oficiales
                     for i, cp in enumerate(df_cols):
-                        if cp in piezas_candidatas:
+                        if cp in COLUMNAS_CLIENTES:
                             val_pieza = str(row[cp]).strip()
                             if val_pieza and val_pieza not in ['NAN', 'NONE', '-', '']:
                                 op_val = '-'
-                                # La Operación es la columna que le sigue a la derecha
+                                # La Operación siempre está dentro de las siguientes 3 columnas
                                 for nc in df_cols[i+1:i+4]:
                                     if 'OPERACION' in nc or 'OPERACIÓN' in nc:
                                         v_op = str(row[nc]).strip()
@@ -120,7 +128,6 @@ def load_data():
                                         break
                                 piezas_found.append({'matriz': val_pieza, 'op': op_val})
 
-                    # Se distribuyen las horas y se agregan a las tablas
                     if piezas_found:
                         hs_per_piece = horas / len(piezas_found)
                         for p in piezas_found:
@@ -137,7 +144,6 @@ def load_data():
                 elif config['tipo'] == 'asistencia':
                     horas_asist_totales = 0.0
                     for i in range(1, 5):
-                        # Buscamos Tarea 1, Tarea 2...
                         c_tarea = next((c for c in df_cols if (f'{i} - TAREA' in c or f'1 - TAREA {i}' in c) and 'HS' not in c), None)
                         c_hs = next((c for c in df_cols if f'TAREA {i} - HS REALIZADAS' in c), None)
 
@@ -181,7 +187,7 @@ def load_data():
 df_raw, df_mant_raw, df_act_raw = load_data()
 
 # ==========================================
-# 3. INTERFAZ Y FILTROS DE FECHA
+# 4. INTERFAZ Y FILTROS DE FECHA
 # ==========================================
 col1, col2 = st.columns(2)
 today = datetime.now()
@@ -197,7 +203,7 @@ if start_date > end_date:
     st.stop()
 
 # ==========================================
-# 4. CLASE PDF (FPDF) Y LÓGICA
+# 5. CLASE PDF (FPDF) Y LÓGICA DE DIBUJO
 # ==========================================
 class PDF(FPDF):
     def __init__(self, start_date, end_date):
@@ -370,7 +376,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     pdf.cell(0, 8, "ANEXO 1: ESTADO DE MATRICES (MANTENIMIENTO)", ln=True, align='L')
     pdf.set_font("Arial", 'I', 9)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 5, "Muestra horas invertidas y estado final extraído estrictamente de Google Forms.", ln=True)
+    pdf.cell(0, 5, "Muestra horas invertidas y estado final en el periodo seleccionado.", ln=True)
     pdf.ln(3)
 
     def draw_mant_table(df_sub, title):
