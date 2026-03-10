@@ -1,10 +1,9 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+import re
 from datetime import datetime, timedelta
 import tempfile
 import os
-import re
 from collections import defaultdict
 from fpdf import FPDF
 
@@ -24,22 +23,22 @@ st.write("<p style='text-align: center;'>Calendarios, Resumen de Horas y Estado 
 st.divider()
 
 # ==========================================
-# 2. EXTRACCIÓN DIRECTA DESDE FORMS
+# 2. EXTRACCIÓN ESTRICTA DESDE FORMS
 # ==========================================
 SHEETS_CONFIG = [
     # ASISTENCIA
-    {"url": "https://docs.google.com/spreadsheets/d/1sccnOPuosjMSepp0FZoEGteYArIIhB2fGH7TeSRW_7E/export?format=csv&gid=1128388185", "tipo": "asistencia"},
-    {"url": "https://docs.google.com/spreadsheets/d/1UNSCxrTy9TUdggNt0ta0TcsEvT3idaRGWcXE_t8J40I/export?format=csv&gid=979884533", "tipo": "asistencia"},
+    {"url": "https://docs.google.com/spreadsheets/d/1sccnOPuosjMSepp0FZoEGteYArIIhB2fGH7TeSRW_7E/export?format=csv&gid=1128388185", "skiprows": 2, "tipo": "asistencia"},
+    {"url": "https://docs.google.com/spreadsheets/d/1UNSCxrTy9TUdggNt0ta0TcsEvT3idaRGWcXE_t8J40I/export?format=csv&gid=979884533", "skiprows": 0, "tipo": "asistencia"},
     # CORRECTIVOS
-    {"url": "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893", "tipo": "correctivo"},
-    {"url": "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679", "tipo": "correctivo"},
+    {"url": "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893", "skiprows": 2, "tipo": "correctivo"},
+    {"url": "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679", "skiprows": 0, "tipo": "correctivo"},
     # PREVENTIVOS
-    {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "tipo": "preventivo"},
-    {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv", "tipo": "preventivo"}
+    {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo"},
+    {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv", "skiprows": 0, "tipo": "preventivo"}
 ]
 
 def clean_matricero(name):
-    """Agrupa al matricero por su Legajo (números iniciales) para evitar duplicados"""
+    """Agrupa al matricero por su Legajo para evitar que la misma persona aparezca dos veces"""
     name = str(name).upper().strip()
     name = re.sub(r'\s+', ' ', name)
     match = re.match(r'^(\d+)\s*[-_]?\s*(.*)', name)
@@ -50,112 +49,110 @@ def clean_matricero(name):
 def load_data():
     cal_data, mant_data, act_data = [], [], []
     
-    # Lista negra de columnas de resumen manual a ignorar completamente
-    SUMMARY_COLS = [
-        '1 - FECHA', '1 - PIEZA', '1 - OPERACION', '1 - MATRICERO', '1 - HORAS', '1 - OT', '1 - TERMINADO?', 
-        'TOTAL HS', 'PRIMER TAREA', 'PRIMERAS HORAS', 'SEGUNDA TAREA', 'SEGUNDAS HORAS', 
-        'TERCER TAREA', 'TERCERAS HORAS', 'CUARTA TAREA', 'CUARTAS HORAS'
-    ]
-
     for config in SHEETS_CONFIG:
         try:
-            df = pd.read_csv(config["url"])
+            df = pd.read_csv(config["url"], skiprows=config["skiprows"])
             
-            # Buscador Inteligente de Encabezados (ignora filas vacías superiores)
-            cols_upper = df.columns.astype(str).str.upper()
-            if not (any('FECHA' in c for c in cols_upper) or any('MATRICERO' in c for c in cols_upper)):
-                for i in range(min(10, len(df))):
-                    row_vals = df.iloc[i].astype(str).str.upper().tolist()
-                    if any('FECHA' in v for v in row_vals) or any('MATRICERO' in v for v in row_vals):
-                        df.columns = df.iloc[i]
-                        df = df.iloc[i+1:].reset_index(drop=True)
-                        break
+            # Limpieza exhaustiva de encabezados: todo a mayúsculas, un solo espacio entre palabras
+            df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
 
-            # Limpiar nombres de columnas y descartar las de resumen
-            df.columns = df.columns.astype(str).str.upper().str.strip()
-            df = df.drop(columns=[c for c in df.columns if c in SUMMARY_COLS or c.endswith('.1') or c.endswith('.2')], errors='ignore')
-            df_cols = df.columns.tolist()
+            # Evitar error de columnas duplicadas en Pandas (agrega .1, .2)
+            cols = pd.Series(df.columns)
+            for dup in cols[cols.duplicated()].unique():
+                cols[cols[cols == dup].index.values.tolist()] = [f"{dup}.{i}" if i != 0 else dup for i in range(sum(cols == dup))]
+            df.columns = cols
             
-            c_fecha = next((c for c in df_cols if c == 'FECHA'), None)
-            c_mat = next((c for c in df_cols if c == 'MATRICERO'), None)
+            # Columnas base estables (Ignorando cualquier columna manual que empiece con "1 -")
+            c_fecha = next((c for c in df.columns if c == 'FECHA'), None)
+            c_mat = next((c for c in df.columns if c == 'MATRICERO'), None)
             
-            if not c_fecha or not c_mat: continue
+            if not c_fecha or not c_mat: 
+                continue
 
+            # Buscar columnas NATIVAS del formulario que piden las horas
+            c_horas = [c for c in df.columns if ('HS REALIZADAS' in c or 'HORAS REALIZADAS' in c) and 'TOTAL' not in c]
+            
+            # Buscar columnas de Piezas/Clientes
+            c_piezas = [c for c in df.columns if c.startswith('PIEZA') or c.startswith('NUMERO DE PIEZA')]
+            
+            # Buscar estado de Mantenimiento
+            c_term = next((c for c in df.columns if 'TERMINADO' in c or 'TERMINO' in c), None)
+
+            # --- EXTRACCIÓN FILA POR FILA ---
             for idx, row in df.iterrows():
-                fecha_val = row[c_fecha]
-                if pd.isna(fecha_val) or str(fecha_val).strip() == '': continue
+                fecha = str(row[c_fecha]).strip()
+                mat = str(row[c_mat]).strip()
                 
-                mat_val = str(row[c_mat]).strip()
-                if not mat_val or mat_val in ['NAN', 'NONE']: continue
-                mat_val = clean_matricero(mat_val)
+                # Ignorar filas vacías
+                if fecha in ['NAN', 'NONE', ''] or mat in ['NAN', 'NONE', '']: 
+                    continue
 
-                # Extraer Horas directamente de las preguntas del Form (Ignorando totales manuales)
-                cols_hs_form = [c for c in df_cols if 'HS REALIZADAS' in c or ('HORAS' in c and 'TOTAL' not in c)]
-                horas_totales_fila = 0.0
-                for c in cols_hs_form:
+                mat = clean_matricero(mat)
+
+                # Sumar las horas exactas de esta fila según el formulario
+                row_hs = 0.0
+                for ch in c_horas:
                     try:
-                        val = float(str(row[c]).replace(',', '.'))
-                        if not np.isnan(val): horas_totales_fila += val
+                        val = float(str(row[ch]).replace(',', '.'))
+                        if not pd.isna(val): row_hs += val
                     except: pass
+                
+                # Si no cargaron horas, se ignora
+                if row_hs == 0: 
+                    continue
 
-                if horas_totales_fila == 0: continue
+                # 1. ENVIAR A CALENDARIO
+                cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': row_hs})
 
-                # 1. Calendario General
-                cal_data.append({'FECHA': fecha_val, 'MATRICERO': mat_val, 'TOTAL_HORAS': horas_totales_fila})
+                # 2. ENVIAR A MANTENIMIENTO
+                if config['tipo'] in ['preventivo', 'correctivo']:
+                    estado = 'NO'
+                    if c_term:
+                        val_t = str(row[c_term]).strip().upper()
+                        if 'SI' in val_t or 'SÍ' in val_t: estado = 'SI'
+                        elif 'NO' in val_t: estado = 'NO'
 
-                # 2. Mantenimiento (Barrido Multi-Cliente de los Forms)
-                if config["tipo"] in ["preventivo", "correctivo"]:
-                    term_val = 'NO'
-                    c_terminado = next((c for c in df_cols if 'TERMINADO' in c or 'TERMINO' in c or 'TERMINÓ' in c), None)
-                    if c_terminado:
-                        val = str(row.get(c_terminado, '')).strip().upper()
-                        if val in ['SI', 'SÍ']: term_val = 'SI'
-                        elif val == 'NO': term_val = 'NO'
-
-                    # Barrido de piezas y operaciones originales del form
-                    piezas_candidatas = [c for c in df_cols if ('PIEZA' in c or 'MATRIZ' in c) and not any(x in c for x in ['TIPO', 'LIMPIEZA', 'CERRAMIENTO', '[', '?', 'MANTENIMIENTO'])]
-                    piezas_encl = []
-                    
-                    for i, col in enumerate(df_cols):
-                        if col in piezas_candidatas:
-                            val = str(row.get(col, '')).strip()
-                            if val and val.upper() not in ['NAN', 'NONE', '-']:
-                                op = '-'
-                                # Buscar la operación adjunta (normalmente la columna que le sigue inmediatamente)
-                                for next_col in df_cols[i+1:i+4]:
-                                    if 'OPERACION' in next_col or 'OPERACIÓN' in next_col:
-                                        op_val = str(row.get(next_col, '')).strip()
-                                        if op_val and op_val.upper() not in ['NAN', 'NONE', '-']: op = op_val
+                    piezas_found = []
+                    # Barrido Horizontal de Clientes
+                    for i, cp in enumerate(df.columns):
+                        if cp in c_piezas:
+                            pieza_val = str(row[cp]).strip()
+                            if pieza_val and pieza_val not in ['NAN', 'NONE', '-', '']:
+                                op_val = '-'
+                                # Buscar la Operación en las siguientes 3 columnas a la derecha
+                                for n_c in df.columns[i+1:i+4]:
+                                    if 'OPERACION' in n_c or 'OPERACIÓN' in n_c:
+                                        t_op = str(row[n_c]).strip()
+                                        if t_op and t_op not in ['NAN', 'NONE', '-', '']: op_val = t_op
                                         break
-                                piezas_encl.append({'matriz': val, 'op': op})
-                                
-                    if piezas_encl:
-                        hs_per = horas_totales_fila / len(piezas_encl)
-                        for p in piezas_encl:
+                                piezas_found.append({'matriz': pieza_val, 'op': op_val})
+
+                    # Repartir horas si cargaron varias matrices en una sola fila (Ej: 8 horas para 2 matrices = 4h c/u)
+                    if piezas_found:
+                        hs_per_piece = row_hs / len(piezas_found)
+                        for p in piezas_found:
                             mant_data.append({
-                                'FECHA': fecha_val, 'MATRICERO': mat_val, 'MATRIZ': p['matriz'],
-                                'OPERACION': p['op'], 'TIPO': config["tipo"].upper(),
-                                'HORAS': hs_per, 'TERMINADO': term_val
+                                'FECHA': fecha, 'MATRICERO': mat, 'MATRIZ': p['matriz'], 
+                                'OPERACION': p['op'], 'TIPO': config['tipo'].upper(),
+                                'HORAS': hs_per_piece, 'TERMINADO': estado
                             })
 
-                # 3. Tareas de Asistencia (Extracción de múltiples tareas por formulario)
-                elif config["tipo"] == "asistencia":
-                    # Busca "1 - Tarea 1", "1 - Tarea 2", etc.
-                    task_cols = [c for c in df_cols if 'TAREA' in c and 'HS' not in c and 'OBSERVACIONES' not in c and 'DESEA' not in c]
-                    
-                    for t_col in task_cols:
-                        match = re.search(r'TAREA\s*(\d+)', t_col)
+                # 3. ENVIAR A ASISTENCIA
+                elif config['tipo'] == 'asistencia':
+                    # Identificar si hay múltiples tareas cargadas
+                    for ch in c_horas:
+                        # Extraer el número de la tarea ("TAREA 1", "TAREA 2")
+                        match = re.search(r'TAREA\s*(\d+)', ch)
                         if match:
-                            t_num = match.group(1)
-                            # Buscar la columna de horas que le corresponde a esta tarea específica
-                            h_col = next((c for c in df_cols if f'TAREA {t_num}' in c and 'HS' in c), None)
-                            
-                            t_val = str(row.get(t_col, '')).strip()
-                            if t_val and t_val.upper() not in ['NAN', 'NONE'] and h_col:
+                            num = match.group(1)
+                            # Buscar la columna que detalla esa tarea específica
+                            c_t = next((c for c in df.columns if f'TAREA {num}' in c and 'HS' not in c and 'OBS' not in c and 'DESEA' not in c), None)
+                            if c_t:
+                                t_val = str(row[c_t]).strip()
                                 try:
-                                    h_val = float(str(row.get(h_col, '0')).replace(',', '.'))
-                                    if h_val > 0:
-                                        act_data.append({'FECHA': fecha_val, 'MATRICERO': mat_val, 'TAREA': t_val, 'HORAS': h_val})
+                                    h_val = float(str(row[ch]).replace(',', '.'))
+                                    if h_val > 0 and t_val and t_val not in ['NAN', 'NONE']:
+                                        act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val})
                                 except: pass
 
         except Exception as e:
@@ -163,7 +160,7 @@ def load_data():
             pass
             
     # ==========================
-    # LIMPIEZA FINAL Y AGRUPACIÓN
+    # AGRUPACIÓN DE DATOS
     # ==========================
     df_calendario = pd.DataFrame(cal_data)
     if not df_calendario.empty:
@@ -266,6 +263,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         pdf.set_text_color(255, 255, 255)
         pdf.cell(196, 6, "TABLA GENERAL DE HORAS POR MATRICERO", border=1, ln=True, align='C', fill=True)
 
+        # CABECERAS (SIN AUSENCIAS NI EXTRAS)
         pdf.set_fill_color(31, 73, 125)
         pdf.cell(70, 6, "MATRICERO", border=1, align='C', fill=True)
         pdf.cell(40, 6, "ESTIMADO DE HS", border=1, align='C', fill=True)
@@ -375,7 +373,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     pdf.cell(0, 8, "ANEXO 1: ESTADO DE MATRICES (MANTENIMIENTO)", ln=True, align='L')
     pdf.set_font("Arial", 'I', 9)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 5, "Muestra horas invertidas y estado final extraído directamente del formulario.", ln=True)
+    pdf.cell(0, 5, "Muestra horas invertidas y estado final en el periodo seleccionado.", ln=True)
     pdf.ln(3)
 
     def draw_mant_table(df_sub, title):
@@ -470,7 +468,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     pdf.cell(0, 8, "ANEXO 2: ACTIVIDADES DE ASISTENCIA", ln=True, align='L')
     pdf.set_font("Arial", 'I', 9)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 5, "Resumen de horas insumidas extraídas del formulario original.", ln=True)
+    pdf.cell(0, 5, "Resumen de horas insumidas por tarea general.", ln=True)
     pdf.ln(3)
 
     if not df_act.empty:
@@ -525,10 +523,10 @@ st.write("")
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 with col_btn2:
     if st.button("🖨️ Procesar y Generar PDF", type="primary", use_container_width=True):
-        with st.spinner("Leyendo datos originales de los Formularios..."):
+        with st.spinner("Construyendo documento PDF..."):
             try:
                 pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date)
-                st.success("¡PDF generado correctamente sin omitir datos!")
+                st.success("¡PDF generado correctamente!")
                 st.download_button(
                     label="📥 Descargar Reporte Final", 
                     data=pdf_data, 
