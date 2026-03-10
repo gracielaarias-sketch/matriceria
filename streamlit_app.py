@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Extracción Posicional Estricta desde Google Forms (Agrupación Corregida).</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Calculo de horas de matriceria (Extracción Nativa y Directa).</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -27,31 +27,27 @@ st.divider()
 # ==========================================
 SHEETS_CONFIG = [
     # ASISTENCIA
-    {"url": "https://docs.google.com/spreadsheets/d/1sccnOPuosjMSepp0FZoEGteYArIIhB2fGH7TeSRW_7E/export?format=csv&gid=1128388185", "skiprows": 2, "tipo": "asistencia"}, 
-    {"url": "https://docs.google.com/spreadsheets/d/1UNSCxrTy9TUdggNt0ta0TcsEvT3idaRGWcXE_t8J40I/export?format=csv&gid=979884533", "skiprows": 0, "tipo": "asistencia"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1sccnOPuosjMSepp0FZoEGteYArIIhB2fGH7TeSRW_7E/export?format=csv&gid=1128388185", "skiprows": 2, "tipo": "asistencia", "empresa": "FUMISCOR"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1UNSCxrTy9TUdggNt0ta0TcsEvT3idaRGWcXE_t8J40I/export?format=csv&gid=979884533", "skiprows": 0, "tipo": "asistencia", "empresa": "FAMMA"}, 
     # CORRECTIVOS
-    {"url": "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893", "skiprows": 2, "tipo": "correctivo"}, 
-    {"url": "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679", "skiprows": 0, "tipo": "correctivo"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1bL_tnlSXGO_t9tKnhIHT5pZ3DAxivbiq2tFETVxBaVI/export?format=csv&gid=1507213893", "skiprows": 2, "tipo": "correctivo", "empresa": "FUMISCOR"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1A-0mngZdgvZGbqzWjA_awhrwfvca0K4aGqp5NBAoFAY/export?format=csv&gid=238711679", "skiprows": 0, "tipo": "correctivo", "empresa": "FAMMA"}, 
     # PREVENTIVOS
-    {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990", "skiprows": 2, "tipo": "preventivo"}, 
-    {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo"} 
+    {"url": "https://docs.google.com/spreadsheets/d/1VqsPNhAlT1kPCltbMWsbkZNFBKdwZRFM5RAmnRV0v3c/export?format=csv&gid=1603203990", "skiprows": 2, "tipo": "preventivo", "empresa": "FUMISCOR"}, 
+    {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo", "empresa": "FAMMA"} 
 ]
 
-# Columnas exactas del formulario donde el matricero elige la pieza
+# Columnas exactas del formulario donde el matricero elige la pieza (Fija, sin checklist)
 VALID_PIEZA_COLS = [
     'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 
     'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
 ]
 
 def clean_text_standard(text):
-    """Convierte a mayúsculas y quita espacios dobles para evitar que la misma matriz no se agrupe."""
+    """Convierte a mayúsculas y quita espacios dobles para agrupar perfecto."""
     if pd.isna(text): return ""
     text = str(text).upper().strip()
     return re.sub(r'\s+', ' ', text)
-
-def is_valid_matricero(text):
-    """Verifica si el texto cumple con el formato de Legajo (Ej: 900224 - PUSZKARKY JORGE)"""
-    return bool(re.match(r'^(\d+)\s*[-_]?\s*(.*)', str(text).strip()))
 
 def clean_matricero(name):
     """Estandariza el nombre del matricero usando su Legajo."""
@@ -61,7 +57,7 @@ def clean_matricero(name):
     return name
 
 # ==========================================
-# 3. MOTOR DE EXTRACCIÓN POSICIONAL
+# 3. MOTOR DE EXTRACCIÓN (BÚSQUEDA EXACTA)
 # ==========================================
 @st.cache_data(ttl=300)
 def load_data():
@@ -74,48 +70,40 @@ def load_data():
             # Limpieza básica de encabezados
             df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
             
-            # Evitar error de Pandas renombrando duplicados (.1, .2)
+            # Evitar error de Pandas renombrando duplicados internamente
             cols = pd.Series(df.columns)
             for dup in cols[cols.duplicated()].unique():
                 cols[cols[cols == dup].index.values.tolist()] = [f"{dup}.{i}" if i != 0 else dup for i in range(sum(cols == dup))]
             df.columns = cols
             df_cols = df.columns.tolist()
 
-            # Buscar índice de Fecha (siempre suele estar al principio)
+            # Buscar índice exacto de Fecha y Matricero en el Formulario
             idx_fecha = next((i for i, c in enumerate(df_cols) if c == 'FECHA'), None)
+            idx_mat = next((i for i, c in enumerate(df_cols) if c == 'MATRICERO'), None)
             
-            if idx_fecha is None: 
+            if idx_fecha is None or idx_mat is None: 
                 continue
 
-            # --- LECTURA FILA POR FILA POR POSICIÓN ---
             for _, row in df.iterrows():
                 fecha = str(row.iloc[idx_fecha]).strip()
-                if fecha in ['NAN', 'NONE', '']: 
-                    continue
-
-                # BÚSQUEDA INTELIGENTE DEL MATRICERO EN TODA LA FILA
-                # (En Preventivos Fumiscor está al final de todo)
-                mat = None
-                for cell in row:
-                    if is_valid_matricero(cell):
-                        mat = str(cell).strip()
-                        break
+                mat = str(row.iloc[idx_mat]).strip()
                 
-                if not mat: 
+                # Si falta fecha o matricero original, descartar
+                if fecha in ['NAN', 'NONE', ''] or mat in ['NAN', 'NONE', '']: 
                     continue
-                    
                 mat = clean_matricero(mat)
 
                 # ====================================================
                 # PREVENTIVO / CORRECTIVO
                 # ====================================================
                 if config['tipo'] in ['preventivo', 'correctivo']:
-                    # 1. Extraer Horas (Limpiando letras si alguien puso "4 hs")
+                    
+                    # 1. Extraer Horas desde la columna EXACTA del formulario
                     idx_hs = next((i for i, c in enumerate(df_cols) if ('HS REALIZADAS' in c or 'HORAS REALIZADAS' in c) and 'TAREA' not in c), None)
                     horas = 0.0
                     if idx_hs is not None and pd.notna(row.iloc[idx_hs]):
                         raw_hs = str(row.iloc[idx_hs]).lower().replace(',', '.')
-                        raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Dejar solo números y puntos
+                        raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Elimina letras si alguien pone "4 hs"
                         try:
                             if raw_hs:
                                 val = float(raw_hs)
@@ -131,7 +119,7 @@ def load_data():
                         if 'SI' in str(row.iloc[idx_term]).upper() or 'SÍ' in str(row.iloc[idx_term]).upper(): 
                             estado = 'SI'
 
-                    # 3. Barrido Posicional de Piezas y Operación
+                    # 3. Búsqueda Exacta de Piezas y Operación
                     piezas_found = []
                     for i, col_name in enumerate(df_cols):
                         base_col = col_name.split('.')[0].strip()
@@ -140,47 +128,58 @@ def load_data():
                             val_pieza = clean_text_standard(row.iloc[i])
                             
                             if val_pieza and val_pieza not in ['NAN', 'NONE', '-']:
-                                op_val = clean_text_standard(row.iloc[i+1]) if (i+1) < len(df_cols) else '-'
-                                if not op_val or op_val in ['NAN', 'NONE', '']: op_val = '-'
+                                op_val = '-'
+                                # Buscar la Operación en las siguientes 3 columnas adyacentes
+                                for j in range(i+1, min(i+4, len(df_cols))):
+                                    if 'OPERACION' in df_cols[j] or 'OPERACIÓN' in df_cols[j]:
+                                        o_v = clean_text_standard(row.iloc[j])
+                                        if o_v not in ['NAN', 'NONE', '']: op_val = o_v
+                                        break
                                 
                                 piezas_found.append({
                                     'matriz': val_pieza, 
                                     'op': op_val
                                 })
 
-                    # 4. Guardar Datos
                     if piezas_found:
+                        # Si reportó 2 matrices distintas, divide sus 8 horas en 4hs para cada matriz.
                         hs_per_piece = horas / len(piezas_found)
                         for p in piezas_found:
                             mant_data.append({
                                 'FECHA': fecha, 'MATRICERO': mat, 'MATRIZ': p['matriz'], 
                                 'OPERACION': p['op'], 'TIPO': config['tipo'].upper(),
-                                'HORAS': hs_per_piece, 'TERMINADO': estado
+                                'HORAS': hs_per_piece, 'TERMINADO': estado, 'EMPRESA': config['empresa']
                             })
-                        cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas})
+                        cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas, 'EMPRESA': config['empresa']})
 
                 # ====================================================
-                # ASISTENCIA (MULTITAREAS)
+                # ASISTENCIA (MULTITAREAS SEGURAS)
                 # ====================================================
                 elif config['tipo'] == 'asistencia':
                     horas_asist_totales = 0.0
-                    for i, col_name in enumerate(df_cols):
-                        if 'TAREA' in col_name and 'HS' not in col_name and 'OBS' not in col_name and 'DESEA' not in col_name and re.search(r'\d', col_name):
-                            t_val = clean_text_standard(row.iloc[i])
+                    
+                    for i in range(1, 5):
+                        # Búsqueda EXACTA de la descripción de Tarea 1, 2...
+                        idx_tarea = next((idx for idx, c in enumerate(df_cols) if (f'{i} - TAREA' in c or f'TAREA {i}' in c) and 'HS' not in c and 'OBS' not in c and 'DESEA' not in c), None)
+                        # Búsqueda EXACTA de las Horas asignadas a ESA tarea específica
+                        idx_hs_tarea = next((idx for idx, c in enumerate(df_cols) if f'TAREA {i}' in c and ('HS' in c or 'HORAS' in c)), None)
+
+                        if idx_tarea is not None and idx_hs_tarea is not None:
+                            t_val = clean_text_standard(row.iloc[idx_tarea])
                             
                             if t_val and t_val not in ['NAN', 'NONE', '-']:
-                                raw_hs = str(row.iloc[i+1]).lower().replace(',', '.')
-                                raw_hs = re.sub(r'[^\d.]', '', raw_hs)
+                                raw_hs = str(row.iloc[idx_hs_tarea]).lower().replace(',', '.')
+                                raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Evita códigos de barras de observaciones
                                 try:
                                     if raw_hs:
                                         h_val = float(raw_hs)
                                         if h_val > 0:
-                                            act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val})
+                                            act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val, 'EMPRESA': config['empresa']})
                                             horas_asist_totales += h_val
                                 except: pass
 
                     if horas_asist_totales > 0:
-                        cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas_asist_totales})
+                        cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas_asist_totales, 'EMPRESA': config['empresa']})
 
         except Exception as e:
             print(f"Error procesando {config['url']}: {e}")
@@ -193,7 +192,7 @@ def load_data():
     if not df_calendario.empty:
         df_calendario['FECHA'] = pd.to_datetime(df_calendario['FECHA'], errors='coerce', dayfirst=True)
         df_calendario = df_calendario.dropna(subset=['FECHA'])
-        df_calendario = df_calendario.groupby(['FECHA', 'MATRICERO'], as_index=False)['TOTAL_HORAS'].sum()
+        df_calendario = df_calendario.groupby(['FECHA', 'MATRICERO', 'EMPRESA'], as_index=False)['TOTAL_HORAS'].sum()
 
     df_mantenimiento = pd.DataFrame(mant_data)
     if not df_mantenimiento.empty:
@@ -229,15 +228,20 @@ if start_date > end_date:
 # 5. CLASE PDF (FPDF) Y LÓGICA DE DIBUJO
 # ==========================================
 class PDF(FPDF):
-    def __init__(self, start_date, end_date):
+    def __init__(self, start_date, end_date, empresa=None):
         super().__init__(orientation='L', unit='mm', format='A4')
         self.rango = f"{start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}"
+        self.empresa = empresa
         self.set_auto_page_break(auto=True, margin=15)
         
     def header(self):
         self.set_font("Arial", 'B', 16)
         self.set_text_color(31, 41, 55)
-        self.cell(0, 8, "Reporte Gerencial - Area de Matriceria", border=0, ln=True, align='C')
+        title = "Reporte Gerencial - Area de Matriceria"
+        if self.empresa:
+            title += f" ({self.empresa})"
+            
+        self.cell(0, 8, title, border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 10)
         self.set_text_color(100, 100, 100)
         self.cell(0, 6, f"Periodo seleccionado: {self.rango}", border=0, ln=True, align='C')
@@ -252,8 +256,15 @@ class PDF(FPDF):
 def clean_text(text):
     return str(text).encode('latin-1', 'replace').decode('latin-1')
 
-def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
-    pdf = PDF(s_date, e_date)
+def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=None):
+    if empresa:
+        df_datos = df_datos_orig[df_datos_orig['EMPRESA'] == empresa].copy() if not df_datos_orig.empty else df_datos_orig
+        df_mant = df_mant_orig[df_mant_orig['EMPRESA'] == empresa].copy() if not df_mant_orig.empty else df_mant_orig
+        df_act = df_act_orig[df_act_orig['EMPRESA'] == empresa].copy() if not df_act_orig.empty else df_act_orig
+    else:
+        df_datos, df_mant, df_act = df_datos_orig.copy(), df_mant_orig.copy(), df_act_orig.copy()
+
+    pdf = PDF(s_date, e_date, empresa)
     meses_es = ["", "ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"]
     dias_espanol = ["LUNES", "MARTES", "MIÉRCOLES", "JUEVES", "VIERNES", "SÁBADO", "DOMINGO"]
     
@@ -262,14 +273,17 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     months_dict = defaultdict(list)
     for d in all_dates: months_dict[(d.year, d.month)].append(d)
 
-    mask_period = (df_datos['FECHA'].dt.date >= s_date) & (df_datos['FECHA'].dt.date <= e_date)
-    df_period = df_datos.loc[mask_period]
-    all_matriceros = sorted(df_period['MATRICERO'].unique()) if not df_period.empty else []
+    if not df_datos.empty:
+        mask_period = (df_datos['FECHA'].dt.date >= s_date) & (df_datos['FECHA'].dt.date <= e_date)
+        df_period = df_datos.loc[mask_period]
+        all_matriceros = sorted(df_period['MATRICERO'].unique()) if not df_period.empty else []
+    else:
+        all_matriceros = []
 
     if not all_matriceros:
         pdf.add_page()
         pdf.set_font("Arial", '', 12)
-        pdf.cell(0, 10, "No hay horas cargadas para el rango seleccionado.", ln=True, align='C')
+        pdf.cell(0, 10, "No hay horas cargadas para el rango y empresa seleccionados.", ln=True, align='C')
         return pdf.output(dest='S').encode('latin-1')
 
     # =========================================================
@@ -487,11 +501,12 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
         pdf.ln(5)
 
     if not df_mant.empty:
-        df_m_period = df_mant[(df_mant['FECHA'].dt.date >= s_date) & (df_mant['FECHA'].dt.date <= e_date)].copy()
+        mask_m = (df_mant['FECHA'].dt.date >= s_date) & (df_mant['FECHA'].dt.date <= e_date)
+        df_m_period = df_mant.loc[mask_m].copy()
+        
         if not df_m_period.empty:
             df_m_period = df_m_period.sort_values('FECHA')
             
-            # AGRUPACIÓN TOTALMENTE ESTANDARIZADA
             df_m_period['MATRIZ'] = df_m_period['MATRIZ'].astype(str).str.upper().str.strip()
             df_m_period['OPERACION'] = df_m_period['OPERACION'].astype(str).str.upper().str.strip()
             
@@ -517,7 +532,7 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     pdf.ln(5)
 
     # =========================================================
-    # PARTE 3: ASISTENCIA (AHORA CONTINUA, SIN SALTO DE PÁGINA)
+    # PARTE 3: ASISTENCIA 
     # =========================================================
     pdf.set_font("Arial", 'B', 14)
     pdf.set_text_color(31, 73, 125)
@@ -528,7 +543,9 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     pdf.ln(3)
 
     if not df_act.empty:
-        df_a_period = df_act[(df_act['FECHA'].dt.date >= s_date) & (df_act['FECHA'].dt.date <= e_date)]
+        mask_a = (df_act['FECHA'].dt.date >= s_date) & (df_act['FECHA'].dt.date <= e_date)
+        df_a_period = df_act.loc[mask_a].copy()
+        
         if not df_a_period.empty:
             df_a_period['TAREA'] = df_a_period['TAREA'].astype(str).str.upper().str.strip()
             resumen_act = df_a_period.groupby('TAREA')['HORAS'].sum().reset_index().sort_values('HORAS', ascending=False)
@@ -574,20 +591,56 @@ def build_pdf(df_datos, df_mant, df_act, s_date, e_date):
     return pdf_bytes
 
 # ==========================================
-# 5. BOTÓN DE DESCARGA
+# 5. BOTONES DE DESCARGA (FILTROS DE EMPRESA)
 # ==========================================
+st.write("---")
+st.markdown("<h4 style='text-align: center;'>Generar Reportes en PDF</h4>", unsafe_allow_html=True)
 st.write("") 
-col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
-with col_btn2:
-    if st.button("🖨️ Procesar y Generar PDF", type="primary", use_container_width=True):
-        with st.spinner("Extrayendo y agrupando datos posicionalmente..."):
+
+col_btn1, col_btn2, col_btn3 = st.columns(3)
+
+with col_btn1:
+    if st.button("🖨️ Procesar Completo", type="primary", use_container_width=True):
+        with st.spinner("Generando reporte unificado..."):
             try:
-                pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date)
-                st.success("¡PDF generado correctamente!")
+                pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date, empresa=None)
+                st.success("¡Reporte Completo listo!")
                 st.download_button(
-                    label="📥 Descargar Reporte Final", 
+                    label="📥 Descargar Completo", 
                     data=pdf_data, 
-                    file_name=f"Reporte_Matriceria_{start_date.strftime('%d%m%Y')}.pdf", 
+                    file_name=f"Reporte_Matriceria_Completo_{start_date.strftime('%d%m%Y')}.pdf", 
+                    mime="application/pdf", 
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"Error generando PDF: {e}")
+
+with col_btn2:
+    if st.button("🏭 Solo Fumiscor", type="secondary", use_container_width=True):
+        with st.spinner("Generando reporte Fumiscor..."):
+            try:
+                pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date, empresa="FUMISCOR")
+                st.success("¡Reporte Fumiscor listo!")
+                st.download_button(
+                    label="📥 Descargar Fumiscor", 
+                    data=pdf_data, 
+                    file_name=f"Reporte_Matriceria_Fumiscor_{start_date.strftime('%d%m%Y')}.pdf", 
+                    mime="application/pdf", 
+                    use_container_width=True
+                )
+            except Exception as e:
+                st.error(f"Error generando PDF: {e}")
+
+with col_btn3:
+    if st.button("⚙️ Solo Famma", type="secondary", use_container_width=True):
+        with st.spinner("Generando reporte Famma..."):
+            try:
+                pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date, empresa="FAMMA")
+                st.success("¡Reporte Famma listo!")
+                st.download_button(
+                    label="📥 Descargar Famma", 
+                    data=pdf_data, 
+                    file_name=f"Reporte_Matriceria_Famma_{start_date.strftime('%d%m%Y')}.pdf", 
                     mime="application/pdf", 
                     use_container_width=True
                 )
