@@ -19,7 +19,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Calculo de horas de matriceria (Extracción Nativa y Directa).</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cálculo de horas de matricería (Extracción Nativa Exacta).</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -37,33 +37,42 @@ SHEETS_CONFIG = [
     {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo", "empresa": "FAMMA"} 
 ]
 
-# Columnas exactas del formulario donde el matricero elige la pieza (Fija, sin checklist)
+# Columnas exactas del formulario
 VALID_PIEZA_COLS = [
     'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 
     'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
 ]
 
-# Filtro anti-basura: Ignora respuestas genéricas que los matriceros ponen en columnas de otros clientes
+# Filtro Extremo Anti-Basura para evitar que las horas se dividan erróneamente
 INVALID_PIECES = [
-    'NAN', 'NONE', '-', '', 'NO APLICA', 'N/A', 'NA', 'OK', 'NOK', 'NO', 
-    'SI', 'SÍ', 'PENDIENTE', 'NO LLEVA', 'NO TIENE', 'NINGUNO', 'NINGUNA', '0', 'X', '.', ','
+    'NAN', 'NONE', '-', '', 'NO APLICA', 'NOAPLICA', 'N/A', 'NA', 'OK', 'NOK', 'NO', 
+    'SI', 'SÍ', 'PENDIENTE', 'NO LLEVA', 'NO TIENE', 'NINGUNO', 'NINGUNA', 
+    '0', 'X', '.', ',', 'NO APLICABLE', 'VACIO', 'S/D'
 ]
 
 def clean_text_standard(text):
-    """Convierte a mayúsculas y quita espacios dobles para agrupar perfecto."""
     if pd.isna(text): return ""
     text = str(text).upper().strip()
     return re.sub(r'\s+', ' ', text)
 
 def clean_matricero(name):
-    """Estandariza el nombre del matricero usando su Legajo."""
     name = clean_text_standard(name)
     match = re.match(r'^(\d+)\s*[-_]?\s*(.*)', name)
     if match: return f"{match.group(1)} - {match.group(2).strip()}"
     return name
 
+def get_col_idx(cols, candidates):
+    """Busca el índice de una columna priorizando el nombre exacto."""
+    for cand in candidates:
+        for i, c in enumerate(cols):
+            if c.strip() == cand: return i
+    for cand in candidates:
+        for i, c in enumerate(cols):
+            if cand in c: return i
+    return None
+
 # ==========================================
-# 3. MOTOR DE EXTRACCIÓN (BÚSQUEDA EXACTA)
+# 3. MOTOR DE EXTRACCIÓN 
 # ==========================================
 @st.cache_data(ttl=300)
 def load_data():
@@ -73,43 +82,39 @@ def load_data():
         try:
             df = pd.read_csv(config["url"], skiprows=config["skiprows"])
             
-            # Limpieza básica de encabezados
+            # Limpieza básica
             df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
-            
-            # Evitar error de Pandas renombrando duplicados internamente
             cols = pd.Series(df.columns)
             for dup in cols[cols.duplicated()].unique():
                 cols[cols[cols == dup].index.values.tolist()] = [f"{dup}.{i}" if i != 0 else dup for i in range(sum(cols == dup))]
             df.columns = cols
             df_cols = df.columns.tolist()
 
-            # Buscar índice exacto de Fecha y Matricero en el Formulario
-            idx_fecha = next((i for i, c in enumerate(df_cols) if c == 'FECHA'), None)
-            idx_mat = next((i for i, c in enumerate(df_cols) if c == 'MATRICERO'), None)
+            # Búsqueda EXACTA por índice de columna para no confundir Fechas con Legajos
+            idx_fecha = get_col_idx(df_cols, ['FECHA'])
+            idx_mat = get_col_idx(df_cols, ['MATRICERO'])
             
             if idx_fecha is None or idx_mat is None: 
                 continue
 
             for _, row in df.iterrows():
                 fecha = str(row.iloc[idx_fecha]).strip()
-                mat = str(row.iloc[idx_mat]).strip()
+                mat_raw = str(row.iloc[idx_mat]).strip()
                 
-                # Si falta fecha o matricero original, descartar
-                if fecha in ['NAN', 'NONE', ''] or mat in ['NAN', 'NONE', '']: 
+                if fecha in ['NAN', 'NONE', ''] or mat_raw in ['NAN', 'NONE', '']: 
                     continue
-                mat = clean_matricero(mat)
+                
+                mat = clean_matricero(mat_raw)
 
                 # ====================================================
                 # PREVENTIVO / CORRECTIVO
                 # ====================================================
                 if config['tipo'] in ['preventivo', 'correctivo']:
-                    
-                    # 1. Extraer Horas desde la columna EXACTA del formulario
                     idx_hs = next((i for i, c in enumerate(df_cols) if ('HS REALIZADAS' in c or 'HORAS REALIZADAS' in c) and 'TAREA' not in c), None)
                     horas = 0.0
                     if idx_hs is not None and pd.notna(row.iloc[idx_hs]):
                         raw_hs = str(row.iloc[idx_hs]).lower().replace(',', '.')
-                        raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Elimina letras si alguien pone "4 hs"
+                        raw_hs = re.sub(r'[^\d.]', '', raw_hs) 
                         try:
                             if raw_hs:
                                 val = float(raw_hs)
@@ -118,7 +123,6 @@ def load_data():
                     
                     if horas <= 0: continue
 
-                    # 2. Extraer Estado (SÍ/NO) buscando desde el final hacia atrás (para atrapar el último de Fumiscor)
                     estado = 'NO'
                     c_terms_idx = [i for i, c in enumerate(df_cols) if 'TERMINADO' in c or 'TERMINO' in c]
                     for i_term in reversed(c_terms_idx):
@@ -131,7 +135,6 @@ def load_data():
                                 estado = 'NO'
                                 break
 
-                    # 3. Búsqueda Exacta de Piezas y Operación (Filtro anti-basura)
                     piezas_found = []
                     for i, col_name in enumerate(df_cols):
                         base_col = col_name.split('.')[0].strip()
@@ -139,10 +142,9 @@ def load_data():
                         if base_col in VALID_PIEZA_COLS:
                             val_pieza = clean_text_standard(row.iloc[i])
                             
-                            # Validar que sea una matriz real y no "NO APLICA"
+                            # Filtro Anti-Basura activado
                             if val_pieza and val_pieza not in INVALID_PIECES:
                                 op_val = '-'
-                                # Buscar la Operación en las siguientes 3 columnas adyacentes
                                 for j in range(i+1, min(i+4, len(df_cols))):
                                     if 'OPERACION' in df_cols[j] or 'OPERACIÓN' in df_cols[j]:
                                         o_v = clean_text_standard(row.iloc[j])
@@ -155,7 +157,6 @@ def load_data():
                                 })
 
                     if piezas_found:
-                        # Si reportó 2 matrices DISTINTAS y VÁLIDAS, divide sus horas equitativamente.
                         hs_per_piece = horas / len(piezas_found)
                         for p in piezas_found:
                             mant_data.append({
@@ -166,15 +167,12 @@ def load_data():
                         cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas, 'EMPRESA': config['empresa']})
 
                 # ====================================================
-                # ASISTENCIA (MULTITAREAS SEGURAS)
+                # ASISTENCIA
                 # ====================================================
                 elif config['tipo'] == 'asistencia':
                     horas_asist_totales = 0.0
-                    
                     for i in range(1, 5):
-                        # Búsqueda EXACTA de la descripción de Tarea 1, 2...
                         idx_tarea = next((idx for idx, c in enumerate(df_cols) if (f'{i} - TAREA' in c or f'TAREA {i}' in c) and 'HS' not in c and 'OBS' not in c and 'DESEA' not in c), None)
-                        # Búsqueda EXACTA de las Horas asignadas a ESA tarea específica
                         idx_hs_tarea = next((idx for idx, c in enumerate(df_cols) if f'TAREA {i}' in c and ('HS' in c or 'HORAS' in c)), None)
 
                         if idx_tarea is not None and idx_hs_tarea is not None:
@@ -182,7 +180,7 @@ def load_data():
                             
                             if t_val and t_val not in ['NAN', 'NONE', '-']:
                                 raw_hs = str(row.iloc[idx_hs_tarea]).lower().replace(',', '.')
-                                raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Evita códigos de barras de observaciones
+                                raw_hs = re.sub(r'[^\d.]', '', raw_hs)
                                 try:
                                     if raw_hs:
                                         h_val = float(raw_hs)
@@ -520,7 +518,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         if not df_m_period.empty:
             df_m_period = df_m_period.sort_values('FECHA')
             
-            # Agrupación Limpia y Directa
             df_m_period['MATRIZ'] = df_m_period['MATRIZ'].astype(str).str.upper().str.strip()
             df_m_period['OPERACION'] = df_m_period['OPERACION'].astype(str).str.upper().str.strip()
             
