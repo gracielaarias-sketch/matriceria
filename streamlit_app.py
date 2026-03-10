@@ -43,6 +43,12 @@ VALID_PIEZA_COLS = [
     'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
 ]
 
+# Filtro anti-basura: Ignora respuestas genéricas que los matriceros ponen en columnas de otros clientes
+INVALID_PIECES = [
+    'NAN', 'NONE', '-', '', 'NO APLICA', 'N/A', 'NA', 'OK', 'NOK', 'NO', 
+    'SI', 'SÍ', 'PENDIENTE', 'NO LLEVA', 'NO TIENE', 'NINGUNO', 'NINGUNA', '0', 'X', '.', ','
+]
+
 def clean_text_standard(text):
     """Convierte a mayúsculas y quita espacios dobles para agrupar perfecto."""
     if pd.isna(text): return ""
@@ -112,14 +118,20 @@ def load_data():
                     
                     if horas <= 0: continue
 
-                    # 2. Extraer Estado (SÍ/NO)
+                    # 2. Extraer Estado (SÍ/NO) buscando desde el final hacia atrás (para atrapar el último de Fumiscor)
                     estado = 'NO'
-                    idx_term = next((i for i, c in enumerate(df_cols) if 'TERMINADO' in c or 'TERMINO' in c), None)
-                    if idx_term is not None and pd.notna(row.iloc[idx_term]):
-                        if 'SI' in str(row.iloc[idx_term]).upper() or 'SÍ' in str(row.iloc[idx_term]).upper(): 
-                            estado = 'SI'
+                    c_terms_idx = [i for i, c in enumerate(df_cols) if 'TERMINADO' in c or 'TERMINO' in c]
+                    for i_term in reversed(c_terms_idx):
+                        if pd.notna(row.iloc[i_term]):
+                            val_t = str(row.iloc[i_term]).upper().strip()
+                            if 'SI' in val_t or 'SÍ' in val_t: 
+                                estado = 'SI'
+                                break
+                            elif 'NO' in val_t:
+                                estado = 'NO'
+                                break
 
-                    # 3. Búsqueda Exacta de Piezas y Operación
+                    # 3. Búsqueda Exacta de Piezas y Operación (Filtro anti-basura)
                     piezas_found = []
                     for i, col_name in enumerate(df_cols):
                         base_col = col_name.split('.')[0].strip()
@@ -127,7 +139,8 @@ def load_data():
                         if base_col in VALID_PIEZA_COLS:
                             val_pieza = clean_text_standard(row.iloc[i])
                             
-                            if val_pieza and val_pieza not in ['NAN', 'NONE', '-']:
+                            # Validar que sea una matriz real y no "NO APLICA"
+                            if val_pieza and val_pieza not in INVALID_PIECES:
                                 op_val = '-'
                                 # Buscar la Operación en las siguientes 3 columnas adyacentes
                                 for j in range(i+1, min(i+4, len(df_cols))):
@@ -142,7 +155,7 @@ def load_data():
                                 })
 
                     if piezas_found:
-                        # Si reportó 2 matrices distintas, divide sus 8 horas en 4hs para cada matriz.
+                        # Si reportó 2 matrices DISTINTAS y VÁLIDAS, divide sus horas equitativamente.
                         hs_per_piece = horas / len(piezas_found)
                         for p in piezas_found:
                             mant_data.append({
@@ -507,6 +520,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         if not df_m_period.empty:
             df_m_period = df_m_period.sort_values('FECHA')
             
+            # Agrupación Limpia y Directa
             df_m_period['MATRIZ'] = df_m_period['MATRIZ'].astype(str).str.upper().str.strip()
             df_m_period['OPERACION'] = df_m_period['OPERACION'].astype(str).str.upper().str.strip()
             
