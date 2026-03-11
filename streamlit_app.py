@@ -231,6 +231,8 @@ with col1:
 with col2:
     end_date = st.date_input("📅 Fecha de Fin", today)
 
+st.caption("💡 *Se recomienda que la fecha de inicio sea un día Lunes para una mejor visualización de las semanas en el PDF.*")
+
 if start_date > end_date:
     st.error("La fecha de inicio no puede ser mayor a la fecha de fin.")
     st.stop()
