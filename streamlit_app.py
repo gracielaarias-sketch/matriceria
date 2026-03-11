@@ -298,81 +298,90 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         return pdf.output(dest='S').encode('latin-1')
 
     # =========================================================
-    # HOJA 1: RESUMEN MENSUAL Y CALENDARIOS
+    # HOJA 1: RESUMEN GENERAL DEL INTERVALO DE TIEMPO
     # =========================================================
-    for (year, month), dates_in_month in months_dict.items():
-        pdf.add_page()
-        pdf.set_font("Arial", 'B', 14)
-        pdf.set_text_color(31, 73, 125)
-        pdf.cell(0, 8, f"RESUMEN MENSUAL DE ASISTENCIA: {meses_es[month]} {year}", ln=True, align='L')
-        pdf.ln(2)
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 14)
+    pdf.set_text_color(31, 73, 125)
+    pdf.cell(0, 8, f"RESUMEN GENERAL DE ASISTENCIA: {s_date.strftime('%d/%m/%Y')} al {e_date.strftime('%d/%m/%Y')}", ln=True, align='L')
+    pdf.ln(2)
 
-        working_days = sum(1 for d in dates_in_month if d.weekday() < 5)
-        estimated_hs = working_days * 8
-        
-        pdf.set_font("Arial", 'B', 9)
-        pdf.set_fill_color(0, 0, 0)
-        pdf.set_text_color(255, 255, 255)
-        pdf.cell(196, 6, "TABLA GENERAL DE HORAS POR MATRICERO", border=1, ln=True, align='C', fill=True)
+    # Calculamos los días hábiles sobre TODO el intervalo de tiempo seleccionado
+    working_days = sum(1 for d in all_dates if d.weekday() < 5)
+    estimated_hs = working_days * 8
+    
+    # --- COMENTARIO DE CÁLCULO DE HORAS ---
+    pdf.set_font("Arial", 'I', 8)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(0, 5, "Calculo de horas estimadas: Dias de la semana * 8 hs por turno", ln=True, align='L')
+    pdf.ln(2)
 
-        pdf.set_fill_color(31, 73, 125)
-        pdf.cell(70, 6, "MATRICERO", border=1, align='C', fill=True)
-        pdf.cell(40, 6, "ESTIMADO DE HS", border=1, align='C', fill=True)
-        pdf.cell(40, 6, "HS CARGADAS", border=1, align='C', fill=True)
-        pdf.set_fill_color(192, 0, 0)
-        pdf.cell(46, 6, "FALTANTE / DIFERENCIA", border=1, align='C', ln=True, fill=True)
+    pdf.set_font("Arial", 'B', 9)
+    pdf.set_fill_color(0, 0, 0)
+    pdf.set_text_color(255, 255, 255)
+    pdf.cell(196, 6, "TABLA GENERAL DE HORAS POR MATRICERO", border=1, ln=True, align='C', fill=True)
 
-        pdf.set_font("Arial", 'B', 9)
-        
-        total_estimado = 0
-        total_cargadas = 0
-        total_diferencia = 0
+    pdf.set_fill_color(31, 73, 125)
+    pdf.cell(70, 6, "MATRICERO", border=1, align='C', fill=True)
+    pdf.cell(40, 6, "ESTIMADO DE HS", border=1, align='C', fill=True)
+    pdf.cell(40, 6, "HS CARGADAS", border=1, align='C', fill=True)
+    pdf.set_fill_color(192, 0, 0)
+    pdf.cell(46, 6, "FALTANTE / DIFERENCIA", border=1, align='C', ln=True, fill=True)
 
-        for mat in all_matriceros:
-            df_mat = df_datos[df_datos['MATRICERO'] == mat]
-            reported = sum(df_mat[df_mat['FECHA'].dt.date == d]['TOTAL_HORAS'].sum() for d in dates_in_month)
-            diff = reported - estimated_hs
+    total_estimado = 0
+    total_cargadas = 0
+    total_diferencia = 0
 
-            total_estimado += estimated_hs
-            total_cargadas += reported
-            total_diferencia += diff
+    pdf.set_font("Arial", 'B', 9)
+    for mat in all_matriceros:
+        df_mat = df_period[df_period['MATRICERO'] == mat]
+        # Sumamos todo lo del periodo
+        reported = df_mat['TOTAL_HORAS'].sum()
+        diff = reported - estimated_hs
 
-            pdf.set_fill_color(240, 240, 240)
-            pdf.set_text_color(0, 0, 0)
-            pdf.cell(70, 6, clean_text(mat[:35]), border=1, fill=True)
-            
-            pdf.set_fill_color(255, 255, 255)
-            pdf.cell(40, 6, str(estimated_hs), border=1, align='C', fill=True)
-            
-            t_rep = str(int(reported)) if reported == int(reported) else f"{reported:.1f}"
-            pdf.cell(40, 6, t_rep, border=1, align='C', fill=True)
+        total_estimado += estimated_hs
+        total_cargadas += reported
+        total_diferencia += diff
 
-            if diff < 0: pdf.set_text_color(192, 0, 0) 
-            elif diff > 0: pdf.set_text_color(0, 128, 0)
-            else: pdf.set_text_color(0, 0, 0)
-            
-            sign = "+" if diff > 0 else ""
-            t_diff = f"{sign}{int(diff)}" if diff == int(diff) else f"{sign}{diff:.1f}"
-            pdf.cell(46, 6, t_diff, border=1, align='C', ln=True, fill=True)
-
-        # TOTAL GENERAL
-        pdf.set_font("Arial", 'B', 9)
-        pdf.set_fill_color(220, 220, 220)
+        pdf.set_fill_color(240, 240, 240)
         pdf.set_text_color(0, 0, 0)
-        pdf.cell(70, 7, "TOTAL GENERAL", border=1, align='R', fill=True)
-        pdf.cell(40, 7, str(int(total_estimado)), border=1, align='C', fill=True)
-        t_rep_tot = str(int(total_cargadas)) if total_cargadas == int(total_cargadas) else f"{total_cargadas:.1f}"
-        pdf.cell(40, 7, t_rep_tot, border=1, align='C', fill=True)
+        pdf.cell(70, 6, clean_text(mat[:35]), border=1, fill=True)
+        
+        pdf.set_fill_color(255, 255, 255)
+        pdf.cell(40, 6, str(estimated_hs), border=1, align='C', fill=True)
+        
+        t_rep = str(int(reported)) if reported == int(reported) else f"{reported:.1f}"
+        pdf.cell(40, 6, t_rep, border=1, align='C', fill=True)
 
-        if total_diferencia < 0: pdf.set_text_color(192, 0, 0) 
-        elif total_diferencia > 0: pdf.set_text_color(0, 128, 0)
+        if diff < 0: pdf.set_text_color(192, 0, 0) 
+        elif diff > 0: pdf.set_text_color(0, 128, 0)
         else: pdf.set_text_color(0, 0, 0)
         
-        sign_tot = "+" if total_diferencia > 0 else ""
-        t_diff_tot = f"{sign_tot}{int(total_diferencia)}" if total_diferencia == int(total_diferencia) else f"{sign_tot}{total_diferencia:.1f}"
-        pdf.cell(46, 7, t_diff_tot, border=1, align='C', ln=True, fill=True)
+        sign = "+" if diff > 0 else ""
+        t_diff = f"{sign}{int(diff)}" if diff == int(diff) else f"{sign}{diff:.1f}"
+        pdf.cell(46, 6, t_diff, border=1, align='C', ln=True, fill=True)
 
-        # CALENDARIOS SEMANALES
+    # TOTAL GENERAL
+    pdf.set_font("Arial", 'B', 9)
+    pdf.set_fill_color(220, 220, 220)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(70, 7, "TOTAL GENERAL", border=1, align='R', fill=True)
+    pdf.cell(40, 7, str(int(total_estimado)), border=1, align='C', fill=True)
+    t_rep_tot = str(int(total_cargadas)) if total_cargadas == int(total_cargadas) else f"{total_cargadas:.1f}"
+    pdf.cell(40, 7, t_rep_tot, border=1, align='C', fill=True)
+
+    if total_diferencia < 0: pdf.set_text_color(192, 0, 0) 
+    elif total_diferencia > 0: pdf.set_text_color(0, 128, 0)
+    else: pdf.set_text_color(0, 0, 0)
+    
+    sign_tot = "+" if total_diferencia > 0 else ""
+    t_diff_tot = f"{sign_tot}{int(total_diferencia)}" if total_diferencia == int(total_diferencia) else f"{sign_tot}{total_diferencia:.1f}"
+    pdf.cell(46, 7, t_diff_tot, border=1, align='C', ln=True, fill=True)
+
+    # =========================================================
+    # CALENDARIOS SEMANALES (VISUALES POR MES)
+    # =========================================================
+    for (year, month), dates_in_month in months_dict.items():
         pdf.add_page()
         pdf.set_font("Arial", 'B', 14)
         pdf.set_text_color(31, 73, 125)
@@ -420,7 +429,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
                 pdf.set_text_color(0, 0, 0)
                 pdf.cell(w_mat, 8, clean_text(mat[:32]), border=1, fill=True)
                 
-                df_mat = df_datos[df_datos['MATRICERO'] == mat]
+                df_mat = df_period[df_period['MATRICERO'] == mat]
                 for d in full_week:
                     val = df_mat[df_mat['FECHA'].dt.date == d]['TOTAL_HORAS'].sum()
                     if val == 0:
@@ -602,7 +611,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     return pdf_bytes
 
 # ==========================================
-# 5. BOTONES DE DESCARGA (FILTROS DE EMPRESA)
+# 6. BOTONES DE DESCARGA (FILTROS DE EMPRESA)
 # ==========================================
 st.write("---")
 st.markdown("<h4 style='text-align: center;'>Generar Reportes en PDF</h4>", unsafe_allow_html=True)
