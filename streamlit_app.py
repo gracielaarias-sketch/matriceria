@@ -55,7 +55,6 @@ def clean_text_standard(text):
     return re.sub(r'\s+', ' ', text)
 
 def clean_matricero(name):
-    """Unifica el legajo y toma solo los primeros dos nombres para evitar duplicados."""
     name = clean_text_standard(name)
     match = re.match(r'^(\d+)\s*[-_]?\s*(.*)', name)
     if match: 
@@ -80,12 +79,11 @@ def get_col_idx(cols, candidates):
 @st.cache_data(ttl=300)
 def load_data():
     cal_data, mant_data, act_data = [], [], []
-    alertas_seguridad = [] # Aquí guardaremos los números anormales detectados
+    alertas_seguridad = []
     
     for config in SHEETS_CONFIG:
         try:
             df = pd.read_csv(config["url"], skiprows=config["skiprows"])
-            
             df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
             cols = pd.Series(df.columns)
             for dup in cols[cols.duplicated()].unique():
@@ -105,7 +103,6 @@ def load_data():
                 
                 if fecha in ['NAN', 'NONE', ''] or mat_raw in ['NAN', 'NONE', '']: 
                     continue
-                
                 mat = clean_matricero(mat_raw)
 
                 # ====================================================
@@ -115,17 +112,15 @@ def load_data():
                     idx_hs = next((i for i, c in enumerate(df_cols) if ('HS REALIZADAS' in c or 'HORAS REALIZADAS' in c) and 'TAREA' not in c), None)
                     horas = 0.0
                     if idx_hs is not None and pd.notna(row.iloc[idx_hs]):
-                        raw_hs = str(row.iloc[idx_hs]).lower().replace(',', '.')
-                        raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Saca letras
-                        try:
-                            if raw_hs:
-                                val = float(raw_hs)
-                                # COMPROBACIÓN: Máximo 24hs. Filtro anti-desbordamiento.
-                                if 0 < val <= 24: 
-                                    horas = val
-                                elif val > 24:
-                                    alertas_seguridad.append(f"Se ignoraron **{val} hs** de {mat} el {fecha} ({config['tipo'].capitalize()}).")
-                        except: pass
+                        raw_text = str(row.iloc[idx_hs]).lower().replace(',', '.')
+                        # Francotirador: Busca SOLO el primer número que encuentre en la celda
+                        match = re.search(r'\d+(\.\d+)?', raw_text)
+                        if match:
+                            val = float(match.group())
+                            if 0 < val <= 24: 
+                                horas = val
+                            elif val > 24:
+                                alertas_seguridad.append(f"Se ignoraron **{val} hs** de {mat} el {fecha} ({config['tipo'].capitalize()}).")
                     
                     if horas <= 0: continue
 
@@ -176,26 +171,22 @@ def load_data():
 
                         if idx_tarea is not None and idx_hs_tarea is not None:
                             t_val = clean_text_standard(row.iloc[idx_tarea])
-                            
                             if t_val and t_val not in ['NAN', 'NONE', '-']:
-                                raw_hs = str(row.iloc[idx_hs_tarea]).lower().replace(',', '.')
-                                raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Saca letras
-                                try:
-                                    if raw_hs:
-                                        h_val = float(raw_hs)
-                                        # COMPROBACIÓN: Máximo 24hs.
-                                        if 0 < h_val <= 24: 
-                                            act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val, 'EMPRESA': config['empresa']})
-                                            horas_asist_totales += h_val
-                                        elif h_val > 24:
-                                            alertas_seguridad.append(f"Se ignoraron **{h_val} hs** de {mat} el {fecha} (Asistencia).")
-                                except: pass
+                                raw_text = str(row.iloc[idx_hs_tarea]).lower().replace(',', '.')
+                                # Francotirador de extracción numérica
+                                match = re.search(r'\d+(\.\d+)?', raw_text)
+                                if match:
+                                    h_val = float(match.group())
+                                    if 0 < h_val <= 24: 
+                                        act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val, 'EMPRESA': config['empresa']})
+                                        horas_asist_totales += h_val
+                                    elif h_val > 24:
+                                        alertas_seguridad.append(f"Se ignoraron **{h_val} hs** de {mat} el {fecha} (Asistencia).")
 
                     if horas_asist_totales > 0:
                         cal_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TOTAL_HORAS': horas_asist_totales, 'EMPRESA': config['empresa']})
 
         except Exception as e:
-            print(f"Error procesando {config['url']}: {e}")
             pass
             
     df_calendario = pd.DataFrame(cal_data)
@@ -222,8 +213,6 @@ df_raw, df_mant_raw, df_act_raw, alertas = load_data()
 # ==========================================
 # 4. INTERFAZ: VISOR DE AUDITORÍA Y FILTROS
 # ==========================================
-
-# Muestra en la app de Streamlit si alguien intentó meter datos basura
 if alertas:
     st.markdown('<div class="warning-box"><strong>⚠️ ALERTA DE SEGURIDAD:</strong> El sistema detectó y bloqueó valores anormalmente altos en la carga de horas (posibles errores de tipeo o escaneo). Estos valores no afectarán el reporte:</div>', unsafe_allow_html=True)
     with st.expander("Ver detalle de registros ignorados"):
@@ -261,7 +250,6 @@ class PDF(FPDF):
         title = "Reporte Gerencial - Area de Matriceria"
         if self.empresa:
             title += f" ({self.empresa})"
-            
         self.cell(0, 8, title, border=0, ln=True, align='C')
         self.set_font("Arial", 'I', 10)
         self.set_text_color(100, 100, 100)
@@ -307,9 +295,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         pdf.cell(0, 10, "No hay horas cargadas para el rango y empresa seleccionados.", ln=True, align='C')
         return pdf.output(dest='S').encode('latin-1')
 
-    # =========================================================
-    # HOJA 1: RESUMEN GENERAL
-    # =========================================================
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
     pdf.set_text_color(31, 73, 125)
@@ -351,7 +336,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         pdf.set_fill_color(240, 240, 240)
         pdf.set_text_color(0, 0, 0)
         pdf.cell(70, 6, clean_text(mat[:35]), border=1, fill=True)
-        
         pdf.set_fill_color(255, 255, 255)
         pdf.cell(40, 6, str(estimated_hs), border=1, align='C', fill=True)
         
@@ -366,7 +350,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         t_diff = f"{sign}{int(diff)}" if diff == int(diff) else f"{sign}{diff:.1f}"
         pdf.cell(46, 6, t_diff, border=1, align='C', ln=True, fill=True)
 
-    # TOTAL GENERAL
     pdf.set_font("Arial", 'B', 9)
     pdf.set_fill_color(220, 220, 220)
     pdf.set_text_color(0, 0, 0)
@@ -383,9 +366,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     t_diff_tot = f"{sign_tot}{int(total_diferencia)}" if total_diferencia == int(total_diferencia) else f"{sign_tot}{total_diferencia:.1f}"
     pdf.cell(46, 7, t_diff_tot, border=1, align='C', ln=True, fill=True)
 
-    # =========================================================
-    # CALENDARIOS SEMANALES
-    # =========================================================
     for (year, month), dates_in_month in months_dict.items():
         pdf.add_page()
         pdf.set_font("Arial", 'B', 14)
@@ -455,9 +435,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
                 pdf.ln()
             pdf.ln(5)
 
-    # =========================================================
-    # HOJA 2: MANTENIMIENTO PREVENTIVO Y CORRECTIVO
-    # =========================================================
+    # Anexos Mantenimiento
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
     pdf.set_text_color(31, 73, 125)
@@ -471,7 +449,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         pdf.set_font("Arial", 'B', 12)
         pdf.set_text_color(31, 73, 125)
         pdf.cell(0, 8, f"MANTENIMIENTO {title}", ln=True, align='L')
-        
         if df_sub.empty:
             pdf.set_font("Arial", '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -482,26 +459,20 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         pdf.set_font("Arial", 'B', 9)
         pdf.set_fill_color(0, 0, 0)
         pdf.set_text_color(255, 255, 255)
-        
         pdf.cell(115, 7, "MATRIZ / PIEZA", border=1, fill=True)
         pdf.cell(40, 7, "OPERACION", border=1, align='C', fill=True)
         pdf.cell(30, 7, "HS INSUMIDAS", border=1, align='C', fill=True)
         pdf.cell(40, 7, "ESTADO AL CIERRE", border=1, align='C', ln=True, fill=True)
-
         pdf.set_font("Arial", '', 9)
         total_hs = 0
 
         for _, row in df_sub.iterrows():
-            matriz = str(row['MATRIZ'])
-            operacion = str(row['OPERACION'])
-            estado = str(row['ULTIMO_ESTADO']).upper()
+            matriz, operacion, estado = str(row['MATRIZ']), str(row['OPERACION']), str(row['ULTIMO_ESTADO']).upper()
             total_hs += row['HS_ACUMULADAS']
-            
             pdf.set_fill_color(255, 255, 255)
             pdf.set_text_color(0, 0, 0)
             pdf.cell(115, 7, clean_text(matriz[:60]), border=1)
             pdf.cell(40, 7, clean_text(operacion[:22]), border=1, align='C')
-            
             hs_txt = str(int(row['HS_ACUMULADAS'])) if row['HS_ACUMULADAS'] == int(row['HS_ACUMULADAS']) else f"{row['HS_ACUMULADAS']:.1f}"
             pdf.cell(30, 7, hs_txt, border=1, align='C')
             
@@ -511,15 +482,12 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
             else:
                 pdf.set_text_color(192, 0, 0)
                 estado_print = "PENDIENTE"
-            
             pdf.cell(40, 7, clean_text(estado_print), border=1, align='C', ln=True)
 
-        # FILA TOTALES
         pdf.set_font("Arial", 'B', 9)
         pdf.set_fill_color(220, 220, 220)
         pdf.set_text_color(0, 0, 0)
         pdf.cell(155, 7, f"TOTAL HORAS {title}", border=1, align='R', fill=True)
-        
         t_hs_txt = str(int(total_hs)) if total_hs == int(total_hs) else f"{total_hs:.1f}"
         pdf.cell(30, 7, t_hs_txt, border=1, align='C', fill=True)
         pdf.cell(40, 7, "", border=1, align='C', ln=True, fill=True)
@@ -528,20 +496,16 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     if not df_mant.empty:
         mask_m = (df_mant['FECHA'].dt.date >= s_date) & (df_mant['FECHA'].dt.date <= e_date)
         df_m_period = df_mant.loc[mask_m].copy()
-        
         if not df_m_period.empty:
             df_m_period = df_m_period.sort_values('FECHA')
             df_m_period['MATRIZ'] = df_m_period['MATRIZ'].astype(str).str.upper().str.strip()
             df_m_period['OPERACION'] = df_m_period['OPERACION'].astype(str).str.upper().str.strip()
-            
             resumen_mant = df_m_period.groupby(['MATRIZ', 'OPERACION', 'TIPO']).agg(
                 HS_ACUMULADAS=('HORAS', 'sum'),
                 ULTIMO_ESTADO=('TERMINADO', 'last')
             ).reset_index()
-
             df_prev = resumen_mant[resumen_mant['TIPO'] == 'PREVENTIVO'].sort_values('HS_ACUMULADAS', ascending=False)
             df_corr = resumen_mant[resumen_mant['TIPO'] == 'CORRECTIVO'].sort_values('HS_ACUMULADAS', ascending=False)
-
             draw_mant_table(df_prev, "PREVENTIVO")
             draw_mant_table(df_corr, "CORRECTIVO")
         else:
@@ -555,9 +519,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
 
     pdf.ln(5)
 
-    # =========================================================
-    # PARTE 3: ASISTENCIA 
-    # =========================================================
+    # Anexo Asistencia
     pdf.set_font("Arial", 'B', 14)
     pdf.set_text_color(31, 73, 125)
     pdf.cell(0, 8, "ANEXO 2: ACTIVIDADES DE ASISTENCIA", ln=True, align='L')
@@ -569,7 +531,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     if not df_act.empty:
         mask_a = (df_act['FECHA'].dt.date >= s_date) & (df_act['FECHA'].dt.date <= e_date)
         df_a_period = df_act.loc[mask_a].copy()
-        
         if not df_a_period.empty:
             df_a_period['TAREA'] = df_a_period['TAREA'].astype(str).str.upper().str.strip()
             resumen_act = df_a_period.groupby('TAREA')['HORAS'].sum().reset_index().sort_values('HORAS', ascending=False)
@@ -579,7 +540,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
             pdf.set_text_color(255, 255, 255)
             pdf.cell(165, 7, "ACTIVIDAD / TAREA", border=1, fill=True)
             pdf.cell(30, 7, "HS TOTALES", border=1, align='C', ln=True, fill=True)
-
             pdf.set_font("Arial", '', 9)
             pdf.set_text_color(0, 0, 0)
             total_hs_act = 0
@@ -593,10 +553,8 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
             pdf.set_font("Arial", 'B', 9)
             pdf.set_fill_color(220, 220, 220)
             pdf.cell(165, 7, "TOTAL HORAS ASISTENCIA", border=1, align='R', fill=True)
-            
             t_hs_act_txt = str(int(total_hs_act)) if total_hs_act == int(total_hs_act) else f"{total_hs_act:.1f}"
             pdf.cell(30, 7, t_hs_act_txt, border=1, align='C', ln=True, fill=True)
-
         else:
             pdf.set_font("Arial", '', 10)
             pdf.set_text_color(0, 0, 0)
@@ -628,15 +586,8 @@ with col_btn1:
             try:
                 pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date, empresa=None)
                 st.success("¡Reporte Completo listo!")
-                st.download_button(
-                    label="📥 Descargar Completo", 
-                    data=pdf_data, 
-                    file_name=f"Reporte_Matriceria_Completo_{start_date.strftime('%d%m%Y')}.pdf", 
-                    mime="application/pdf", 
-                    use_container_width=True
-                )
-            except Exception as e:
-                st.error(f"Error generando PDF: {e}")
+                st.download_button(label="📥 Descargar Completo", data=pdf_data, file_name=f"Reporte_Matriceria_Completo_{start_date.strftime('%d%m%Y')}.pdf", mime="application/pdf", use_container_width=True)
+            except Exception as e: st.error(f"Error generando PDF: {e}")
 
 with col_btn2:
     if st.button("🏭 Solo Fumiscor", type="secondary", use_container_width=True):
@@ -644,15 +595,8 @@ with col_btn2:
             try:
                 pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date, empresa="FUMISCOR")
                 st.success("¡Reporte Fumiscor listo!")
-                st.download_button(
-                    label="📥 Descargar Fumiscor", 
-                    data=pdf_data, 
-                    file_name=f"Reporte_Matriceria_Fumiscor_{start_date.strftime('%d%m%Y')}.pdf", 
-                    mime="application/pdf", 
-                    use_container_width=True
-                )
-            except Exception as e:
-                st.error(f"Error generando PDF: {e}")
+                st.download_button(label="📥 Descargar Fumiscor", data=pdf_data, file_name=f"Reporte_Matriceria_Fumiscor_{start_date.strftime('%d%m%Y')}.pdf", mime="application/pdf", use_container_width=True)
+            except Exception as e: st.error(f"Error generando PDF: {e}")
 
 with col_btn3:
     if st.button("⚙️ Solo Famma", type="secondary", use_container_width=True):
@@ -660,12 +604,5 @@ with col_btn3:
             try:
                 pdf_data = build_pdf(df_raw, df_mant_raw, df_act_raw, start_date, end_date, empresa="FAMMA")
                 st.success("¡Reporte Famma listo!")
-                st.download_button(
-                    label="📥 Descargar Famma", 
-                    data=pdf_data, 
-                    file_name=f"Reporte_Matriceria_Famma_{start_date.strftime('%d%m%Y')}.pdf", 
-                    mime="application/pdf", 
-                    use_container_width=True
-                )
-            except Exception as e:
-                st.error(f"Error generando PDF: {e}")
+                st.download_button(label="📥 Descargar Famma", data=pdf_data, file_name=f"Reporte_Matriceria_Famma_{start_date.strftime('%d%m%Y')}.pdf", mime="application/pdf", use_container_width=True)
+            except Exception as e: st.error(f"Error generando PDF: {e}")
