@@ -15,11 +15,12 @@ st.set_page_config(page_title="Reporte Matricería", layout="centered", page_ico
 st.markdown("""
 <style>
     .header-style { font-size: 26px; font-weight: bold; margin-bottom: 5px; color: #1F2937; text-align: center; }
+    .warning-box { padding: 10px; background-color: #FFF3CD; color: #856404; border-radius: 5px; border-left: 5px solid #FFEBA1; margin-bottom: 15px;}
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="header-style">📅 Reporte Gerencial de Matricería</div>', unsafe_allow_html=True)
-st.write("<p style='text-align: center;'>Cálculo de horas de matricería.</p>", unsafe_allow_html=True)
+st.write("<p style='text-align: center;'>Cálculo de horas de matricería y limpieza automática de datos.</p>", unsafe_allow_html=True)
 st.divider()
 
 # ==========================================
@@ -37,13 +38,11 @@ SHEETS_CONFIG = [
     {"url": "https://docs.google.com/spreadsheets/d/1MptnOuRfyOAr1EgzNJVygTtNziOSdzXJn-PZDX0pNzc/export?format=csv&gid=324842888", "skiprows": 0, "tipo": "preventivo", "empresa": "FAMMA"} 
 ]
 
-# Columnas exactas del formulario
 VALID_PIEZA_COLS = [
     'PIEZAS RENAULT', 'PIEZAS FAURECIA', 'PIEZAS FIAT', 'PIEZAS DENSO', 
     'PIEZAS PEUGEOT', 'PIEZA FIAT', 'PIEZA NISSAN', 'PIEZA RENAULT', 'NUMERO DE PIEZA'
 ]
 
-# Filtro Extremo Anti-Basura para evitar que las horas se dividan erróneamente
 INVALID_PIECES = [
     'NAN', 'NONE', '-', '', 'NO APLICA', 'NOAPLICA', 'N/A', 'NA', 'OK', 'NOK', 'NO', 
     'SI', 'SÍ', 'PENDIENTE', 'NO LLEVA', 'NO TIENE', 'NINGUNO', 'NINGUNA', 
@@ -56,13 +55,17 @@ def clean_text_standard(text):
     return re.sub(r'\s+', ' ', text)
 
 def clean_matricero(name):
+    """Unifica el legajo y toma solo los primeros dos nombres para evitar duplicados."""
     name = clean_text_standard(name)
     match = re.match(r'^(\d+)\s*[-_]?\s*(.*)', name)
-    if match: return f"{match.group(1)} - {match.group(2).strip()}"
+    if match: 
+        legajo = match.group(1)
+        nombres = match.group(2).strip().split()
+        short_name = " ".join(nombres[:2]) if len(nombres) >= 2 else " ".join(nombres)
+        return f"{legajo} - {short_name}"
     return name
 
 def get_col_idx(cols, candidates):
-    """Busca el índice de una columna priorizando el nombre exacto."""
     for cand in candidates:
         for i, c in enumerate(cols):
             if c.strip() == cand: return i
@@ -72,17 +75,17 @@ def get_col_idx(cols, candidates):
     return None
 
 # ==========================================
-# 3. MOTOR DE EXTRACCIÓN 
+# 3. MOTOR DE EXTRACCIÓN Y LIMPIEZA
 # ==========================================
 @st.cache_data(ttl=300)
 def load_data():
     cal_data, mant_data, act_data = [], [], []
+    alertas_seguridad = [] # Aquí guardaremos los números anormales detectados
     
     for config in SHEETS_CONFIG:
         try:
             df = pd.read_csv(config["url"], skiprows=config["skiprows"])
             
-            # Limpieza básica
             df.columns = df.columns.astype(str).str.upper().str.strip().str.replace(r'\s+', ' ', regex=True)
             cols = pd.Series(df.columns)
             for dup in cols[cols.duplicated()].unique():
@@ -90,7 +93,6 @@ def load_data():
             df.columns = cols
             df_cols = df.columns.tolist()
 
-            # Búsqueda EXACTA por índice de columna para no confundir Fechas con Legajos
             idx_fecha = get_col_idx(df_cols, ['FECHA'])
             idx_mat = get_col_idx(df_cols, ['MATRICERO'])
             
@@ -114,11 +116,15 @@ def load_data():
                     horas = 0.0
                     if idx_hs is not None and pd.notna(row.iloc[idx_hs]):
                         raw_hs = str(row.iloc[idx_hs]).lower().replace(',', '.')
-                        raw_hs = re.sub(r'[^\d.]', '', raw_hs) 
+                        raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Saca letras
                         try:
                             if raw_hs:
                                 val = float(raw_hs)
-                                if val > 0: horas = val
+                                # COMPROBACIÓN: Máximo 24hs. Filtro anti-desbordamiento.
+                                if 0 < val <= 24: 
+                                    horas = val
+                                elif val > 24:
+                                    alertas_seguridad.append(f"Se ignoraron **{val} hs** de {mat} el {fecha} ({config['tipo'].capitalize()}).")
                         except: pass
                     
                     if horas <= 0: continue
@@ -138,11 +144,8 @@ def load_data():
                     piezas_found = []
                     for i, col_name in enumerate(df_cols):
                         base_col = col_name.split('.')[0].strip()
-                        
                         if base_col in VALID_PIEZA_COLS:
                             val_pieza = clean_text_standard(row.iloc[i])
-                            
-                            # Filtro Anti-Basura activado
                             if val_pieza and val_pieza not in INVALID_PIECES:
                                 op_val = '-'
                                 for j in range(i+1, min(i+4, len(df_cols))):
@@ -150,11 +153,7 @@ def load_data():
                                         o_v = clean_text_standard(row.iloc[j])
                                         if o_v not in ['NAN', 'NONE', '']: op_val = o_v
                                         break
-                                
-                                piezas_found.append({
-                                    'matriz': val_pieza, 
-                                    'op': op_val
-                                })
+                                piezas_found.append({'matriz': val_pieza, 'op': op_val})
 
                     if piezas_found:
                         hs_per_piece = horas / len(piezas_found)
@@ -180,13 +179,16 @@ def load_data():
                             
                             if t_val and t_val not in ['NAN', 'NONE', '-']:
                                 raw_hs = str(row.iloc[idx_hs_tarea]).lower().replace(',', '.')
-                                raw_hs = re.sub(r'[^\d.]', '', raw_hs)
+                                raw_hs = re.sub(r'[^\d.]', '', raw_hs) # Saca letras
                                 try:
                                     if raw_hs:
                                         h_val = float(raw_hs)
-                                        if h_val > 0:
+                                        # COMPROBACIÓN: Máximo 24hs.
+                                        if 0 < h_val <= 24: 
                                             act_data.append({'FECHA': fecha, 'MATRICERO': mat, 'TAREA': t_val, 'HORAS': h_val, 'EMPRESA': config['empresa']})
                                             horas_asist_totales += h_val
+                                        elif h_val > 24:
+                                            alertas_seguridad.append(f"Se ignoraron **{h_val} hs** de {mat} el {fecha} (Asistencia).")
                                 except: pass
 
                     if horas_asist_totales > 0:
@@ -196,9 +198,6 @@ def load_data():
             print(f"Error procesando {config['url']}: {e}")
             pass
             
-    # ==========================
-    # AGRUPACIÓN DE DATOS
-    # ==========================
     df_calendario = pd.DataFrame(cal_data)
     if not df_calendario.empty:
         df_calendario['FECHA'] = pd.to_datetime(df_calendario['FECHA'], errors='coerce', dayfirst=True)
@@ -215,13 +214,22 @@ def load_data():
         df_actividades['FECHA'] = pd.to_datetime(df_actividades['FECHA'], errors='coerce', dayfirst=True)
         df_actividades = df_actividades.dropna(subset=['FECHA'])
 
-    return df_calendario, df_mantenimiento, df_actividades
+    return df_calendario, df_mantenimiento, df_actividades, alertas_seguridad
 
-df_raw, df_mant_raw, df_act_raw = load_data()
+# CARGAMOS LOS DATOS
+df_raw, df_mant_raw, df_act_raw, alertas = load_data()
 
 # ==========================================
-# 4. INTERFAZ Y FILTROS DE FECHA
+# 4. INTERFAZ: VISOR DE AUDITORÍA Y FILTROS
 # ==========================================
+
+# Muestra en la app de Streamlit si alguien intentó meter datos basura
+if alertas:
+    st.markdown('<div class="warning-box"><strong>⚠️ ALERTA DE SEGURIDAD:</strong> El sistema detectó y bloqueó valores anormalmente altos en la carga de horas (posibles errores de tipeo o escaneo). Estos valores no afectarán el reporte:</div>', unsafe_allow_html=True)
+    with st.expander("Ver detalle de registros ignorados"):
+        for alerta in set(alertas):
+            st.write(f"- {alerta}")
+
 col1, col2 = st.columns(2)
 today = datetime.now()
 inicio_mes = today.replace(day=1)
@@ -231,7 +239,7 @@ with col1:
 with col2:
     end_date = st.date_input("📅 Fecha de Fin", today)
 
-st.caption("💡 *Se recomienda que la fecha de inicio sea un día Lunes para una mejor visualización de las semanas en el PDF.*")
+st.caption("💡 *Asegúrate de incluir todos los días que deseas evaluar. Te recomiendo elegir un día Lunes como inicio para ver semanas completas.*")
 
 if start_date > end_date:
     st.error("La fecha de inicio no puede ser mayor a la fecha de fin.")
@@ -300,7 +308,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         return pdf.output(dest='S').encode('latin-1')
 
     # =========================================================
-    # HOJA 1: RESUMEN GENERAL DEL INTERVALO DE TIEMPO
+    # HOJA 1: RESUMEN GENERAL
     # =========================================================
     pdf.add_page()
     pdf.set_font("Arial", 'B', 14)
@@ -308,11 +316,9 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     pdf.cell(0, 8, f"RESUMEN GENERAL DE ASISTENCIA: {s_date.strftime('%d/%m/%Y')} al {e_date.strftime('%d/%m/%Y')}", ln=True, align='L')
     pdf.ln(2)
 
-    # Calculamos los días hábiles sobre TODO el intervalo de tiempo seleccionado
     working_days = sum(1 for d in all_dates if d.weekday() < 5)
     estimated_hs = working_days * 8
     
-    # --- COMENTARIO DE CÁLCULO DE HORAS ---
     pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(100, 100, 100)
     pdf.cell(0, 5, "Calculo de horas estimadas: Dias de la semana * 8 hs por turno", ln=True, align='L')
@@ -330,14 +336,11 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     pdf.set_fill_color(192, 0, 0)
     pdf.cell(46, 6, "FALTANTE / DIFERENCIA", border=1, align='C', ln=True, fill=True)
 
-    total_estimado = 0
-    total_cargadas = 0
-    total_diferencia = 0
+    total_estimado, total_cargadas, total_diferencia = 0, 0, 0
 
     pdf.set_font("Arial", 'B', 9)
     for mat in all_matriceros:
         df_mat = df_period[df_period['MATRICERO'] == mat]
-        # Sumamos todo lo del periodo
         reported = df_mat['TOTAL_HORAS'].sum()
         diff = reported - estimated_hs
 
@@ -381,7 +384,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     pdf.cell(46, 7, t_diff_tot, border=1, align='C', ln=True, fill=True)
 
     # =========================================================
-    # CALENDARIOS SEMANALES (VISUALES POR MES)
+    # CALENDARIOS SEMANALES
     # =========================================================
     for (year, month), dates_in_month in months_dict.items():
         pdf.add_page()
@@ -481,7 +484,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         pdf.set_text_color(255, 255, 255)
         
         pdf.cell(115, 7, "MATRIZ / PIEZA", border=1, fill=True)
-        pdf.cell(40, 7, "OPERACIÓN", border=1, align='C', fill=True)
+        pdf.cell(40, 7, "OPERACION", border=1, align='C', fill=True)
         pdf.cell(30, 7, "HS INSUMIDAS", border=1, align='C', fill=True)
         pdf.cell(40, 7, "ESTADO AL CIERRE", border=1, align='C', ln=True, fill=True)
 
@@ -528,7 +531,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
         
         if not df_m_period.empty:
             df_m_period = df_m_period.sort_values('FECHA')
-            
             df_m_period['MATRIZ'] = df_m_period['MATRIZ'].astype(str).str.upper().str.strip()
             df_m_period['OPERACION'] = df_m_period['OPERACION'].astype(str).str.upper().str.strip()
             
@@ -588,7 +590,6 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
                 hs_txt = str(int(row['HORAS'])) if row['HORAS'] == int(row['HORAS']) else f"{row['HORAS']:.1f}"
                 pdf.cell(30, 7, hs_txt, border=1, align='C', ln=True)
 
-            # FILA TOTALES
             pdf.set_font("Arial", 'B', 9)
             pdf.set_fill_color(220, 220, 220)
             pdf.cell(165, 7, "TOTAL HORAS ASISTENCIA", border=1, align='R', fill=True)
@@ -613,7 +614,7 @@ def build_pdf(df_datos_orig, df_mant_orig, df_act_orig, s_date, e_date, empresa=
     return pdf_bytes
 
 # ==========================================
-# 6. BOTONES DE DESCARGA (FILTROS DE EMPRESA)
+# 6. BOTONES DE DESCARGA
 # ==========================================
 st.write("---")
 st.markdown("<h4 style='text-align: center;'>Generar Reportes en PDF</h4>", unsafe_allow_html=True)
